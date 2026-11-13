@@ -3,7 +3,7 @@
 # film Ewald sum (2D + 3D on one grid) against direct sums at tol 1e-6, without and with a remainder (the exact pair
 # of common/symbol_pairs.jl). Kernels from Fourier symbols: test_symbol.jl. Timings and tighter tolerances are in
 # validation/val_fmm.jl and val_ewald.jl.
-#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["kernels"])'   (from src/OpenSurfaces)
+#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["kernels"])'   (from the package root)
 include(joinpath(@__DIR__, "common", "symbol_pairs.jl"))
 using OpenSurfaces, LinearAlgebra, StaticArrays, SparseArrays, Printf, Test, Random, QuadGK
 using SpecialFunctions: besselj0, besselj

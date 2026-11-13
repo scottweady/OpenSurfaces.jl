@@ -3,7 +3,7 @@
 # a zero remainder gives the base exactly; the regularized gradient against adaptive quadrature; the errors (no base,
 # beyond the table without a far field) and the far field; SmoothConvolution of the scalar remainder against the
 # direct sum. The pairs are in common/symbol_pairs.jl; the Ewald sums with a remainder are test_kernels.jl's.
-#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["symbol"])'   (from src/OpenSurfaces)
+#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["symbol"])'   (from the package root)
 include(joinpath(@__DIR__, "common", "symbol_pairs.jl"))
 using Printf, Test, Random, QuadGK
 using OpenSurfaces: _x2mJ1

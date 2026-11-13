@@ -1,5 +1,5 @@
 # FMM2D / FMM3D timings at N = 1e5 sources = targets (printed).
-#   julia --project=. -t 8 src/OpenSurfaces/test/validation/val_fmm.jl
+#   run by run_all.jl (from the package root; `push!(ARGS, "fmm")` before its include runs this file only)
 using OpenSurfaces, LinearAlgebra, Test, Random
 randpts(rng, n; L=1.0, c=Vec2(0, 0)) = [c + L * Vec2(rand(rng), rand(rng)) for _ in 1:n]
 randvec(rng, n) = [Vec2(randn(rng), randn(rng)) for _ in 1:n]

@@ -1,5 +1,5 @@
 # Validation for src/quadrature/line_quad.jl: error vs p and K on a star (printed convergence report).
-#   julia --project=. -t 8 src/OpenSurfaces/test/validation/val_line_quad.jl < /dev/null
+#   run by run_all.jl (from the package root; `push!(ARGS, "line_quad")` before its include runs this file only)
 
 include(joinpath(@__DIR__, "..", "common", "line_quad_common.jl"))
 

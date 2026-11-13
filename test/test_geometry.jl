@@ -3,7 +3,7 @@
 # (src/geometry/mesh.jl) with and without holes, several drops. Exact moments, areas,
 # second moments and perimeters; coverage of the domain by the panels exactly once; layout of the
 # edge columns; rejection of overlapping or wrongly oriented curves.
-#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["geometry"])'   (from src/OpenSurfaces)
+#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["geometry"])'   (from the package root)
 using OpenSurfaces, LinearAlgebra, StaticArrays, Test
 using OpenSurfaces: gausslegendre
 

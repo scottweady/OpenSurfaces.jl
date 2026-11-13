@@ -2,7 +2,7 @@
 # line_quad.jl) against QuadGK and exact identities; the area potentials (src/quadrature/area_quad.jl)
 # on single panels against exact integrals (divergence theorem) and on the disc against closed forms. Convergence in
 # p and K: validation/val_line_quad.jl, val_area_quad.jl.
-#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["quadrature"])'   (from src/OpenSurfaces)
+#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["quadrature"])'   (from the package root)
 include(joinpath(@__DIR__, "common", "line_quad_common.jl"))
 include(joinpath(@__DIR__, "common", "area_quad_common.jl"))
 using SpecialFunctions: gamma, ellipe

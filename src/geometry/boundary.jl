@@ -73,6 +73,7 @@ function panel_tail(c::AbstractVector{Vec2})
 end
 panel_tail(P::CurvePanel) = panel_tail(P.c)
 
+"Length of the panel curve (the sum of `panel_length`)."
 curve_length(panels::AbstractVector{CurvePanel}) = sum(panel_length, panels)
 
 """Area enclosed by the (closed, counterclockwise) panel curve: ½∮(x dy − y dx), exact up

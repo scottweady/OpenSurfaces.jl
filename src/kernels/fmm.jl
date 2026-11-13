@@ -1,7 +1,7 @@
 # Fast (FMM) and direct evaluation of 2D Stokeslet sums and in-plane 3D Stokeslet sums.
 #
 # Library normalizations (determined empirically against direct sums, FMM2D v0.2.x,
-# FMM3D v2.x; see src/OpenSurfaces/test/test_kernels.jl, which re-checks all of these):
+# FMM3D v2.x; see test/test_kernels.jl, which re-checks all of these):
 #
 #   FMM2D.stfmm2d, Stokeslet strengths σ (r = x − y, ρ = |r|):
 #       U_lib(x) = Σ [ r rᵀ/(2ρ²) − (log ρ / 2) I ] σ        (natural log, scale 1, no constant)

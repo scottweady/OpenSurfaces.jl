@@ -24,7 +24,7 @@ bd, ad, _ = build_mesh(pans, 10)
 
 # the 3D Laplace single layer of a unit density on the disc: S[1] = E(r²)/π (complete elliptic integral)
 S = SingleLayer3D(ad)
-u = single_layer(S, ones(length(ad)))       # within 1e-8 of E(r²)/π at the default tol
+u = single_layer(S, ones(length(ad)))       # within 2e-8 of E(r²)/π at the default tol
 ```
 
 | | |

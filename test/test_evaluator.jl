@@ -2,7 +2,7 @@
 # FMM2D, Helmholtz FMM) against the direct sum with the same corrections, area and line sources, stored and smooth
 # densities; several target sets against one at a time; `evaluator_matrix` against the apply; the errors. The
 # accuracy of the potentials themselves: test_volume.jl (closed forms on the disc).
-#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["evaluator"])'   (from src/OpenSurfaces)
+#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["evaluator"])'   (from the package root)
 include(joinpath(@__DIR__, "common", "symbol_pairs.jl"))
 using OpenSurfaces, LinearAlgebra, Printf, Random, Test, QuadGK
 using SpecialFunctions: besselk

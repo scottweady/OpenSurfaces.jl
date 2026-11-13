@@ -18,7 +18,9 @@
 
 using StaticArrays, LinearAlgebra
 
+"A point or vector of the plane, `SVector{2,Float64}`."
 const Vec2 = SVector{2,Float64}
+"A 2×2 matrix, `SMatrix{2,2,Float64,4}`: the form of every kernel value in the quadrature routines."
 const Mat2 = SMatrix{2,2,Float64,4}
 
 # ---------------------------------------------------------------------------------------
@@ -71,6 +73,7 @@ function gausslegendre(n::Int)
     x, w
 end
 
+"p-point Gauss–Legendre rule on [−1, 1]."
 gl_rule(p::Int) = Rule1D(gausslegendre(p)...)
 "Gauss–Jacobi rule with weight (1+x)^{-1/2}."
 gj_rule(p::Int) = Rule1D(gauss_jacobi_half(p)...)
@@ -105,6 +108,7 @@ function lagrange_row!(out::AbstractVector, r::Rule1D, x::Real)
     out ./= s
     return out
 end
+"Values of the Lagrange basis polynomials of rule `r` at `x` (a new vector; see `lagrange_row!`)."
 lagrange_row(r::Rule1D, x::Real) = lagrange_row!(zeros(length(r)), r, x)
 
 """Matrix mapping values at nodes of `r` to values at points `xs`."""
@@ -163,6 +167,7 @@ function legendre_coefs(v::AbstractVector{T}) where {T}
     c
 end
 
+"The Legendre polynomial P_k(s), by the three-term recurrence."
 function legendre_P(k::Int, s::Real)
     k == 0 && return 1.0
     p0, p1 = 1.0, float(s)
@@ -195,6 +200,7 @@ segment_coefs(a::Vec2, b::Vec2) = [(a + b) / 2, (b - a) / 2]
 struct CurvePanel
     c::Vector{Vec2}
 end
+"(γ(s), γ′(s)) of the boundary panel `P` at its parameter s ∈ [−1, 1]."
 curve_eval(P::CurvePanel, s::Real) = legendre_eval(P.c, s)   # (γ, γ')
 
 """Ruled area panel x(s,t) = ½(1-t)B(s) + ½(1+t)T(s)."""
@@ -221,12 +227,21 @@ function panel_diameter(P::Panel)
     c = (panel_map(P, -1, -1)[1], panel_map(P, 1, -1)[1], panel_map(P, 1, 1)[1], panel_map(P, -1, 1)[1])
     maximum(norm(c[i] - c[j]) for i in 1:4 for j in i+1:4)
 end
+"The point x(0, 0) of the area panel `P`."
 panel_center(P::Panel) = panel_map(P, 0.0, 0.0)[1]
 
 # ---------------------------------------------------------------------------------------
 # Discretizations
 # ---------------------------------------------------------------------------------------
 
+"""
+    BoundaryDisc(panels, p; pstart, cstart)
+
+The boundary Γ on its panels, with p Gauss–Legendre nodes per panel: nodes `x`, arclength weights `w`, unit tangents
+`τ`, outward normals `n` and signed curvatures `κ` (> 0 where Ω is locally convex). Panel k owns the nodes
+`panel_nodes(bd, k)`. Several drops and curves: drop i owns the panels `drop_panels(bd, i)`, closed curve c the panels
+`curve_panels(bd, c)` (each drop: its outer curve first, then its holes). Built by `build_mesh`.
+"""
 struct BoundaryDisc
     p::Int
     rule::Rule1D                  # Gauss–Legendre, p nodes
@@ -261,10 +276,21 @@ function BoundaryDisc(panels::Vector{CurvePanel}, p::Int; pstart::Vector{Int}=[1
     BoundaryDisc(p, r, panels, x, w, τ, n, κ, pstart, cstart)
 end
 
+"The number of panels of a `BoundaryDisc` or an `AreaDisc`."
 npanels(d::BoundaryDisc) = length(d.panels)
 Base.length(d::BoundaryDisc) = length(d.x)
+"The indices of the nodes of panel `k` (p of them on Γ, p² on an area panel)."
 panel_nodes(d::BoundaryDisc, k::Int) = (k-1)*d.p+1:k*d.p
 
+"""
+    AreaDisc(panels, p; pstart)
+
+The area mesh of Ω: ruled `Panel`s with a p×p tensor grid of nodes each (s index fastest; panel k owns
+`panel_nodes(ad, k)`), the nodes `x`, their parameters `st`, Jacobians `J` and quadrature weights `w` = wₛ wₜ J. On a
+weighted panel (an edge panel, its bottom edge on Γ) a density is stored as μ̃ = μ (1 + t)^{1/2}, the t-rule is
+Gauss–Jacobi and its weight is folded into `w`; `wfac` = (1 + t)^{−1/2} there (1 elsewhere) gives μ = μ̃ · wfac.
+Drop i owns the panels `drop_panels(ad, i)`. Built by `build_mesh`.
+"""
 struct AreaDisc
     p::Int
     rs::Rule1D                    # s-rule (Gauss–Legendre)
@@ -303,6 +329,7 @@ end
 npanels(d::AreaDisc) = length(d.panels)
 Base.length(d::AreaDisc) = length(d.x)
 panel_nodes(d::AreaDisc, k::Int) = (k-1)*d.p^2+1:k*d.p^2
+"The t-rule of area panel `k`: Gauss–Jacobi on a weighted panel, Gauss–Legendre otherwise."
 trule(d::AreaDisc, k::Int) = d.panels[k].weighted ? d.rtw : d.rt
 
 # ---------------------------------------------------------------------------------------
@@ -317,8 +344,11 @@ end
 const _Disc = Union{BoundaryDisc,AreaDisc}
 _nper(d::BoundaryDisc) = d.p
 _nper(d::AreaDisc) = d.p^2
+"The number of drops (disjoint components of Ω) of a discretization."
 ndrops(d::_Disc) = length(d.pstart) - 1
+"The panels of drop `i`."
 drop_panels(d::_Disc, i::Int) = d.pstart[i]:d.pstart[i+1]-1
+"The nodes of drop `i`."
 drop_nodes(d::_Disc, i::Int) = (d.pstart[i]-1)*_nper(d)+1:(d.pstart[i+1]-1)*_nper(d)
 """Drop index of each panel."""
 panel_drop(d::_Disc) = reduce(vcat, [fill(i, length(drop_panels(d, i))) for i in 1:ndrops(d)])
@@ -326,8 +356,11 @@ panel_drop(d::_Disc) = reduce(vcat, [fill(i, length(drop_panels(d, i))) for i in
 node_drop(d::_Disc) = reduce(vcat, [fill(i, length(drop_nodes(d, i))) for i in 1:ndrops(d)])
 
 # closed curves of a boundary discretization (a drop with holes has several)
+"The number of closed curves of Γ (outer curves and holes)."
 ncurves(d::BoundaryDisc) = length(d.cstart) - 1
+"The panels of closed curve `c`."
 curve_panels(d::BoundaryDisc, c::Int) = d.cstart[c]:d.cstart[c+1]-1
+"The nodes of closed curve `c`."
 curve_nodes(d::BoundaryDisc, c::Int) = (d.cstart[c]-1)*d.p+1:(d.cstart[c+1]-1)*d.p
 """Curves of drop i (outer first)."""
 drop_curves(d::BoundaryDisc, i::Int) = findfirst(==(d.pstart[i]), d.cstart):findfirst(==(d.pstart[i+1]), d.cstart)-1

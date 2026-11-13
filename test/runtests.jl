@@ -4,7 +4,7 @@
 # the 3D Laplace single layer on the disc.
 # Each file runs in its own module so their helpers do not collide; shared references are in common/. The
 # convergence sweeps and timings behind them are the opt-in tier validation/run_all.jl.
-# From this package's directory (src/OpenSurfaces):
+# From the package root:
 #   julia -t 8 --project -e 'using Pkg; Pkg.test()'                                       (all files)
 #   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["kernels", "symbol"])'         (only test_kernels.jl, test_symbol.jl)
 using Test, Printf

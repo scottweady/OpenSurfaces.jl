@@ -1,7 +1,7 @@
 # The 3D Laplace single layer S_Ω (src/evaluators/single_layer.jl) on the unit disc against the closed
 # forms of Gomez Herrera & Weady (2026), eq. 4.6: S_D[1] = E(r)/π and S_D[ω ζ^j] = ((λ_j^j − λ_{j+1}^{j+1}|ζ|²)/8) ζ^j,
 # ω = √(1 − r²), for the real densities Re ω ζ^j, j = 0–2, at the area nodes.
-#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["single_layer"])'   (from src/OpenSurfaces)
+#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["single_layer"])'   (from the package root)
 using OpenSurfaces, LinearAlgebra, Printf, Test
 using SpecialFunctions: gamma, ellipe
 

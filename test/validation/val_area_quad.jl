@@ -6,7 +6,7 @@
 #   3. all self nodes of the straight and the graded-layer panel vs the exact integral (p = 8)
 #   4. global disk tests at p = 8, 10, 12 (the weighted edge layer, against closed forms)
 #   AREA_QUAD_TIMING=1: also the correction assembly time on 16² and 45² panel grids.
-#   julia --project=. -t 8 src/OpenSurfaces/test/validation/val_area_quad.jl < /dev/null
+#   run by run_all.jl (from the package root; `push!(ARGS, "area_quad")` before its include runs this file only)
 
 include(joinpath(@__DIR__, "..", "common", "area_quad_common.jl"))
 const VERBOSE = true

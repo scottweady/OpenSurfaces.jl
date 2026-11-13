@@ -1,6 +1,6 @@
 # Ewald/NUFFT in-plane 3D Stokeslet on mesh nodes: set-up and apply time against FMM3D, and the error
 # against FMM3D at 1e-13 (printed).
-#   julia --project=. -t 8 src/OpenSurfaces/test/validation/val_ewald.jl
+#   run by run_all.jl (from the package root; `push!(ARGS, "ewald")` before its include runs this file only)
 using OpenSurfaces, LinearAlgebra, Printf
 relerr(u, v) = maximum(norm.(u .- v)) / maximum(norm.(v))
 # timing vs FMM3D on mesh nodes

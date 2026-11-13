@@ -1,7 +1,7 @@
 # Volume potentials (src/evaluators/volume.jl) on the unit disc against the closed forms of Gomez
 # Herrera & Weady (2026), appendix F: V_D[ζ^m] = (|ζ|²/(4(m+1)) + b_m) ζ^m and B_D[ζ^m] = (a_m|ζ|⁴ + b_m|ζ|² + c_m) ζ^m
 # (κ = 0), for the real densities Re ζ^m, m = 0–3: ∇V and ∇B at the area nodes and on Γ.
-#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["volume"])'   (from src/OpenSurfaces)
+#   julia -t 8 --project -e 'using Pkg; Pkg.test(test_args=["volume"])'   (from the package root)
 using OpenSurfaces, LinearAlgebra, Printf, Test
 
 Vc(m) = (1 / (4(m + 1)), m == 0 ? 0.0 : -1 / (4m))
