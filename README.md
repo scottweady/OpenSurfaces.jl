@@ -10,6 +10,16 @@ The kernel contract (what a callable kernel takes and returns, `r = x − y`, co
 docstring, `?OpenSurfaces`. Every solve, fast sum and quadrature takes `tol`, defaulting to
 `OpenSurfaces.DEFAULT_TOL` = 1e-6.
 
+## Documentation
+
+https://scottweady.github.io/OpenSurfaces.jl/ (getting started, the method, examples, the API reference and a code
+map), built from `docs/` and published to the gh-pages branch on every push to main. To build it locally:
+
+```bash
+julia --project=docs -e 'using Pkg; Pkg.instantiate()'    # once
+julia --project=docs docs/make.jl                          # then open docs/build/index.html
+```
+
 ## Use
 
 A domain from a 2π-periodic counterclockwise parametrization, its mesh, and a potential on it (from this directory, after
@@ -48,6 +58,8 @@ The standard kernel types the quadrature dispatches on, `StokesKernel` and `Trac
 | `src/quadrature/` | `line_quad.jl` (boundary), `area_quad.jl` (area, graded edge layers) |
 | `src/evaluators/` | `evaluator.jl` (`Evaluator`), `volume.jl`, `single_layer.jl` |
 | `test/` | regression tests at the production settings against exact or direct references; `common/` shared references; `validation/` the convergence sweeps and timings |
+| `docs/` | the documentation: `make.jl`, `src/` (the pages), `figures/` (data and plots), `codemap.jl` |
+| `examples/` | scripts that evaluate or solve against exact solutions (`julia -t 8 --project examples/<name>.jl`) |
 
 ## Tests
 

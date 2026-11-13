@@ -1,0 +1,9 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+OpenSurfaces = "a18dc5ed-daa2-41d3-b562-912f4d2cb0b3"
+
+[compat]
+Documenter = "1"
+
+[sources]
+OpenSurfaces = {path = ".."}
