@@ -100,7 +100,7 @@ U = Evaluator(Stokeslet3D(), ad)(F)                        # (3/16, 0) at every 
 | `MHKernel(k)`, `MHNormalKernel(k, normals)` | ``K_0(k\rho)/2\pi`` and its normal derivative at the targets | FMM2D (Helmholtz at ``ik``), or Ewald + NUFFT |
 | `OpenSurfaces.StokesKernel(μ_2D, μ_3D)` | the 2D Stokeslet `G2` plus `G3` | direct |
 | any callable `K(r)` or `K(i, r)` | your kernel | direct |
-| `SymbolKernel` | a kernel from its Fourier symbol (below) | as `remainder` of its base: the base's; as the kernel itself: direct |
+| `SymbolKernel` | a kernel from its Fourier symbol (below) | as `remainder` of its base: the base's; as the kernel itself: Ewald + NUFFT of the whole kernel (base `Stokeslet3D` or `LaplaceKernel3D`, any decay), else direct |
 
 `fast = :direct` forces direct sums. `tol` sets the accuracy of the local corrections and `eps` that of the fast sum
 (both default to `OpenSurfaces.DEFAULT_TOL` = 1e-6).

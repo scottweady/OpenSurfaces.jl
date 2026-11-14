@@ -108,8 +108,9 @@ function _omj0z2(z)
     acc
 end
 
-# (α, β) at ρ by direct Hankel quadrature (k, w nodes and weights; s, d the symbol combinations times k there)
-function _rh_direct(k, w, s, d, ρ)
+# (α, β) at ρ by direct Hankel quadrature (k, w nodes and weights; s, d the symbol combinations times k there);
+# `over_ρ`: (α, A2/ρ) instead, smooth where β = −2A2/ρ² is not (an algebraic remainder: A2 ~ ρ, β ~ 1/ρ at ρ = 0)
+function _rh_direct(k, w, s, d, ρ, over_ρ::Bool=false)
     A0 = 0.0; A2r = 0.0
     @inbounds for i in eachindex(k)
         z = k[i] * ρ
@@ -117,7 +118,7 @@ function _rh_direct(k, w, s, d, ρ)
         A2r += w[i] * d[i] * (z < 1e-4 ? k[i]^2 / 8 * (1 - z^2 / 12) : SpecialFunctions.besselj(2, z) / ρ^2)
     end
     A0 /= 2π; A2r /= 2π
-    (A0 + ρ^2 * A2r, -2A2r)
+    over_ρ ? (A0 + ρ^2 * A2r, ρ * A2r) : (A0 + ρ^2 * A2r, -2A2r)
 end
 
 # scalar outputs at ρ; f = k Δ at the nodes; `reg`: the gradient with J1(x)/x − 1/2
@@ -184,8 +185,11 @@ src/kernels/symbol.jl).
   table. `kmax` defaults to 25/scale, which suits a remainder that decays exponentially (as a finite depth's).
 - `tol`: for a remainder that decays algebraically (`K.decay === :algebraic`; then R has a cone or a log at ρ = 0),
   the default `kmax` grows (up to 64 ×) until the tail beyond it is below `tol` of |R(0)|, with a warning if it
-  cannot. An `Evaluator` integrates such a remainder with the near corrections of the whole kernel, base + R; the
-  Ewald sums refuse it (their long-range multiplier would sample the cone).
+  cannot. An `Evaluator` integrates such a remainder with the near corrections of the whole kernel, base + R. As a
+  `remainder` of an Ewald sum it is refused (the long-range multiplier would sample the cone); an `Evaluator` of the
+  SymbolKernel itself sums it by Ewald, its remainder split by weight between the long and the short range. A tensor
+  one is tabulated as (α, A2/ρ), since β = −2A2/ρ² then grows like 1/ρ at ρ = 0 (`kernel_remainder` still returns
+  (α, β), with β = 0 at ρ = 0).
 
 Callable as `K(r)`: `base(r)` plus the remainder (a `Mat2` for a tensor symbol, a scalar otherwise). `kernel_remainder(K, ρ)`
 gives the remainder's outputs alone.
@@ -231,7 +235,7 @@ function SymbolKernel(symbol; base=nothing, scale::Real, far=nothing, remainder=
     npan = (n = ρc / scale; abs(n - round(n)) < 1e-9 ? round(Int, n) : ceil(Int, n))
     if tensor
         s = [x * (Δk[1] + Δk[2]) / 2 for (x, Δk) in zip(k, v)]; d = [x * (Δk[2] - Δk[1]) / 2 for (x, Δk) in zip(k, v)]
-        table = RadialTable{2}(ρ -> _rh_direct(k, w, s, d, ρ), ρc, npan, nq)
+        table = RadialTable{2}(ρ -> _rh_direct(k, w, s, d, ρ, decay === :algebraic), ρc, npan, nq)
         outs = (:α, :β)
     else
         outs = outputs === nothing ? (:value, :gradient) : Tuple(outputs)
@@ -305,7 +309,11 @@ _symbol_minus(a, b) = a - b
 
 """The remainder's outputs at distance ρ: (α, β) of a tensor kernel, the chosen `outputs` of a scalar one."""
 @inline function kernel_remainder(K::SymbolKernel, ρ)
-    ρ < K.table.ρc && return K.table(ρ)
+    if ρ < K.table.ρc
+        K.tensor && K.decay === :algebraic || return K.table(ρ)
+        α, a = K.table(ρ)                      # (α, A2/ρ): β = −2A2/ρ² (0 at ρ = 0, where β r rᵀ = 0)
+        return (α, ρ == 0 ? 0.0 : -2a / ρ)
+    end
     K.far === nothing && throw(DomainError(ρ, "SymbolKernel: beyond the table (ρc = $(K.table.ρc)) and no far field"))
     K.far(ρ)
 end

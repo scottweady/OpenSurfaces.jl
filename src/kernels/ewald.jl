@@ -74,11 +74,20 @@ that sit exactly on a source, and duplicated source points. σ defaults to the v
 `nneigh` short-range neighbors per target. A `remainder` (a tensor `SymbolKernel` with base `Stokeslet3D()`, at
 μ = 1; e.g. a finite depth, R_H = G_H − G3) is added to the long-range multiplier, all pairs including i = j, with σ
 small enough for the grid to resolve it on its `scale`.
+
+`whole = true`: `remainder` is a tensor `SymbolKernel` K with base `Stokeslet3D(; μ_3D)` (its remainder in absolute
+units, any decay), and the plan sums K itself, coincident pairs skipped (R split by weight, `_split_w`).
 """
 function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, remainder=nothing, tol::Real=DEFAULT_TOL,
-                       σ=nothing, nneigh::Real=150, nthreads::Int=Threads.nthreads())
+                       σ=nothing, nneigh::Real=150, whole::Bool=false, nthreads::Int=Threads.nthreads())
     tm = Dict{Symbol,Float64}()
-    _smooth_remainder(remainder, "EwaldStokes3D")
+    if whole
+        remainder isa SymbolKernel && remainder.tensor && remainder.base isa Stokeslet3D ||
+            throw(ArgumentError("EwaldStokes3D: whole = true takes a tensor SymbolKernel with base Stokeslet3D"))
+        remainder.base.μ == μ_3D || throw(ArgumentError("EwaldStokes3D: μ_3D differs from the SymbolKernel's base"))
+    else
+        _smooth_remainder(remainder, "EwaldStokes3D")
+    end
     selfmode = trg === nothing
     T = selfmode ? src : collect(Vec2, trg)
     allp = selfmode ? src : vcat(src, T)
@@ -93,10 +102,12 @@ function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, 
     RH = remainder
     σs = RH === nothing ? σ0 : min(σ0, 2c * RH.scale / _NYQ_H)
     rc = c * σs
+    whole && _check_split_range(RH, L, rc, σs, "EwaldStokes3D")
+    wmin = whole ? _split_wmin(tol) : -1.0
     # window w(t; ℓ) = ½ erfc((|t| − ℓ − cσs)/σs): 1 − O(tol) for |t| ≤ ℓ, O(tol) beyond ℓ + 2cσs
     S = L .+ 2rc
     P = Tuple(2 .* S)
-    h = π * σs / (2c)
+    h = π * σs / (2c) / (whole ? _split_h(RH) : 1.0)
     M = ntuple(d -> 2 * ceil(Int, P[d] / (2h)), 2)
     hx = P[1] / M[1]; hy = P[2] / M[2]
     tm[:multiplier] = @elapsed begin
@@ -110,11 +121,12 @@ function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, 
                 r = Vec2(rx, ry); ρ = norm(r)
                 φ, dφ = _phiL(ρ, σs)
                 k11, k12, k22 = _Kphi(r, φ, dφ, ρ)
-                if RH !== nothing                  # 4π R_H at μ = 1 (scaled by 1/(4πμ_3D) below)
-                    r11, r12, r22 = remainder_tensor(RH, r)
-                    k11 += 4π * r11; k12 += 4π * r12; k22 += 4π * r22
-                end
                 W = wx * wy
+                if RH !== nothing && W >= wmin     # 4π R_H at μ = 1 (whole: 4πμ_3D w R) (scaled by 1/(4πμ_3D) below)
+                    r11, r12, r22 = remainder_tensor(RH, r)
+                    s = whole ? 4π * μ_3D * _split_w(ρ, σs) : 4π
+                    k11 += s * r11; k12 += s * r12; k22 += s * r22
+                end
                 K[a+1, b+1, 1] = W * k11; K[a+1, b+1, 2] = W * k12; K[a+1, b+1, 3] = W * k22
             end
         end
@@ -132,8 +144,11 @@ function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, 
         FINUFFT.finufft_setpts!(plan2, tx, ty)
     end
     c8 = 1 / (4π * μ_3D)
-    tm[:shortrange] = @elapsed Ssr = _sr_matrix(src, T, selfmode, rc,
-        (i, r) -> (ρ = norm(r); (φ, dφ) = _phiS(ρ, σs); c8 .* _Kphi(r, φ, dφ, ρ)))
+    tm[:shortrange] = @elapsed Ssr = whole ?
+        _sr_matrix(src, T, selfmode, max(rc, _split_rc(σs, tol)),
+                   (i, r) -> (ρ = norm(r); (φ, dφ) = _phiS(ρ, σs); ws = _split_tail((ρ / σs)^2);
+                              c8 .* _Kphi(r, φ, dφ, ρ) .+ ws .* remainder_tensor(RH, r))) :
+        _sr_matrix(src, T, selfmode, rc, (i, r) -> (ρ = norm(r); (φ, dφ) = _phiS(ρ, σs); c8 .* _Kphi(r, φ, dφ, ρ)))
     kl0 = (2 / (σs * sqrt(π))) * (erfc((-L[1] - rc) / σs) / 2) * (erfc((-L[2] - rc) / σs) / 2) / (4π * μ_3D)
     selfcoef = selfmode ? kl0 : 0.0
     EwaldStokes3D(Float64(μ_3D), σs, rc, c0, P, M, Khat, plan1, plan2, length(src), length(T),
@@ -174,6 +189,58 @@ function ewald_apply(E::EwaldStokes3D, f::AbstractVector{Vec2})
 end
 
 # ---------------------------------------------------------------------------------------
+# A whole SymbolKernel (base + a remainder R that may decay algebraically, with a cone or a log at ρ = 0): R is split
+# by the weight w(ρ) = P(m, U), U = ρ²/σ², the regularized lower incomplete gamma function: w R into the long-range
+# multiplier and (1 − w) R = e^{−U} Σ_{j<m} Uʲ/j! R into the short range, out to where that is below tol. w is a sum
+# of Gaussians of width σ times polynomials, so the grid of the base's split resolves it, and w ~ U^m/m! at ρ = 0
+# cancels a cone of R to order 2m (w R is C^{2m}); its leftover Fourier tail is why an algebraic remainder takes a
+# finer grid (`_SPLIT_REFINE`). Coincident pairs skipped: w R vanishes there, and the short range drops them (as the
+# direct sum of the whole kernel, whose near corrections hold its singular part).
+# ---------------------------------------------------------------------------------------
+
+const _SPLIT_M = 4
+const _SPLIT_REFINE = 2.0                      # grid refinement for an algebraic remainder (Nyquist × σ = 2c × this)
+@inline function _split_w(ρ, σ)
+    U = (ρ / σ)^2
+    if U < _SPLIT_M                            # e^{−U} Σ_{j≥m} Uʲ/j!, without cancellation
+        t = U^_SPLIT_M / factorial(_SPLIT_M); s = t
+        for j in _SPLIT_M+1:_SPLIT_M+60
+            t *= U / j; s += t
+            t < 1e-17 * s && break
+        end
+        return exp(-U) * s
+    end
+    1 - _split_tail(U)
+end
+@inline function _split_tail(U)                # 1 − w = e^{−U} Σ_{j<m} Uʲ/j!
+    t = 1.0; s = 1.0
+    for j in 1:_SPLIT_M-1
+        t *= U / j; s += t
+    end
+    exp(-U) * s
+end
+function _split_rc(σ, tol)
+    U = 1.0
+    while _split_tail(U) > tol / 10
+        U *= 1.05
+    end
+    σ * sqrt(U)
+end
+_split_wmin(tol) = 1e-3 * tol                  # window values below this are not sampled (R is not evaluated there)
+_split_h(R) = R.decay === :algebraic ? _SPLIT_REFINE : 1.0
+
+"""The remainder must be known out to the sampled window: its table or its far field."""
+function _check_split_range(R, L, rc, σ, who)
+    # the window ½erfc((|t| − L − rc)/σ) falls below _split_wmin(1e-16) ≈ 1e-19 by |t| = L + rc + 6.5σ per axis
+    ρneed = norm(L .+ rc .+ 6.5σ)
+    R.far === nothing && ρneed > table_range(R) &&
+        throw(ArgumentError("$who: the SymbolKernel's table reaches ρc = $(table_range(R)), but the long-range " *
+                            "window needs its remainder out to $(round(ρneed; sigdigits=3)); build it with a larger " *
+                            "`ρc` or a `far` field"))
+    nothing
+end
+
+# ---------------------------------------------------------------------------------------
 # The same split for the 3D Laplace kernel on coplanar points: u(xᵢ) = Σⱼ qⱼ / (4π |xᵢ − yⱼ|), with
 # 1/ρ = φ_L + φ_S as above (the scalar part of the Stokeslet's K[φ]). One scalar NUFFT pair per apply, a scalar
 # multiplier and a sparse short-range matrix. Coincident pairs are skipped (as FMM3D's lfmm3d and the direct sum):
@@ -197,15 +264,18 @@ struct EwaldLaplace3D
 end
 
 """
-    EwaldLaplace3D(src, trg=nothing; tol=DEFAULT_TOL, σ=nothing, nneigh=150)
+    EwaldLaplace3D(src, trg=nothing; remainder=nothing, tol=DEFAULT_TOL, σ=nothing, nneigh=150)
 
 Plan for u(xᵢ) = Σⱼ qⱼ / (4π|xᵢ − yⱼ|) (`LaplaceKernel3D`) with fixed source points `src` in the plane and targets
 `trg` (`nothing`: targets = sources). Coincident pairs are skipped, as by FMM3D and the direct sum: i = j, explicit
 targets that sit exactly on a source, and duplicated source points. σ defaults to the value giving about `nneigh`
 short-range neighbors per target. Apply with `ewald_apply(E, q)` (q includes the quadrature weights).
+
+`remainder`: a scalar `SymbolKernel` K with base `LaplaceKernel3D()`: the plan sums K itself (1/(4πρ) plus its
+remainder R, which may decay algebraically), coincident pairs skipped; R is split by weight (`_split_w`).
 """
-function EwaldLaplace3D(src::AbstractVector{Vec2}, trg=nothing; tol::Real=DEFAULT_TOL, σ=nothing, nneigh::Real=150,
-                        nthreads::Int=Threads.nthreads())
+function EwaldLaplace3D(src::AbstractVector{Vec2}, trg=nothing; remainder=nothing, tol::Real=DEFAULT_TOL, σ=nothing,
+                        nneigh::Real=150, nthreads::Int=Threads.nthreads())
     tm = Dict{Symbol,Float64}()
     selfmode = trg === nothing
     T = selfmode ? src : collect(Vec2, trg)
@@ -214,15 +284,27 @@ function EwaldLaplace3D(src::AbstractVector{Vec2}, trg=nothing; tol::Real=DEFAUL
     c0 = (lo + hi) / 2
     L = max.(hi - lo, 1e-12)
     c = max(erfcinv(tol), 3.0)
-    σs = σ === nothing ? _calibrate_sigma(src, T, c, nneigh, sqrt(nneigh / (π * length(src) / (L[1] * L[2]))) / c) :
+    σ0 = σ === nothing ? _calibrate_sigma(src, T, c, nneigh, sqrt(nneigh / (π * length(src) / (L[1] * L[2]))) / c) :
                          Float64(σ)
+    R = remainder
+    if R !== nothing
+        R isa SymbolKernel && !R.tensor && R.base isa LaplaceKernel3D && :value in R.outputs ||
+            throw(ArgumentError("EwaldLaplace3D: the remainder is a scalar SymbolKernel with base LaplaceKernel3D " *
+                                "and the output :value"))
+    end
+    σs = R === nothing ? σ0 : min(σ0, 2c * R.scale / _NYQ_H)
     rc = c * σs
     S = L .+ 2rc
     P = Tuple(2 .* S)
-    h = π * σs / (2c)
+    h = π * σs / (2c) / (R === nothing ? 1.0 : _split_h(R))
     M = ntuple(d -> 2 * ceil(Int, P[d] / (2h)), 2)
+    iv = R === nothing ? 0 : findfirst(==(:value), R.outputs)
+    Rv(ρ) = kernel_remainder(R, ρ)[iv]
+    R === nothing || _check_split_range(R, L, rc, σs, "EwaldLaplace3D")
     tm[:multiplier] = @elapsed begin
-        K = _windowed_fft(r -> (_phiL(norm(r), σs)[1],), 1, M, P, L, rc, σs)
+        K = R === nothing ? _windowed_fft(r -> (_phiL(norm(r), σs)[1],), 1, M, P, L, rc, σs) :
+            _windowed_fft(r -> (ρ = norm(r); (_phiL(ρ, σs)[1] + 4π * _split_w(ρ, σs) * Rv(ρ),)), 1, M, P, L, rc, σs;
+                          wmin=_split_wmin(tol))
         Khat = real.(view(K, :, :, 1)) ./ 4π
     end
     tm[:plans] = @elapsed begin
@@ -234,7 +316,9 @@ function EwaldLaplace3D(src::AbstractVector{Vec2}, trg=nothing; tol::Real=DEFAUL
         plan2 = FINUFFT.finufft_makeplan(2, [M[1], M[2]], +1, 1, ntol; modeord=1, nthreads=nthreads)
         FINUFFT.finufft_setpts!(plan2, tx, ty)
     end
-    tm[:shortrange] = @elapsed St = _sr_scalar(src, T, selfmode, rc, ρ -> erfc(ρ / σs) / (4π * ρ))
+    tm[:shortrange] = @elapsed St = R === nothing ? _sr_scalar(src, T, selfmode, rc, ρ -> erfc(ρ / σs) / (4π * ρ)) :
+        _sr_scalar(src, T, selfmode, max(rc, _split_rc(σs, tol)),
+                   ρ -> erfc(ρ / σs) / (4π * ρ) + _split_tail((ρ / σs)^2) * Rv(ρ))
     kl0 = (2 / (σs * sqrt(π))) * (erfc((-L[1] - rc) / σs) / 2) * (erfc((-L[2] - rc) / σs) / 2) / 4π
     EwaldLaplace3D(σs, rc, M, Khat, plan1, plan2, length(src), length(T), selfmode, St,
                    _coincident_pairs(src, T, selfmode), kl0, tm)

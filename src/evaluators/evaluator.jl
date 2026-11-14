@@ -4,7 +4,8 @@
 # the smooth rule summed by a fast method chosen by the kernel's type, plus sparse local corrections
 # (`area_correction`, `line_correction`). It holds the four pieces every potential assembled by hand:
 #   1. the fast sum: Ewald (or FMM3D) for `Stokeslet3D` and `LaplaceKernel3D`, FMM2D (or Ewald) for the 2D Laplace and
-#      biharmonic kernels and (at wavenumber ik) for the modified Helmholtz ones, direct sums for any other callable;
+#      biharmonic kernels and (at wavenumber ik) for the modified Helmholtz ones, Ewald for a `SymbolKernel` of base
+#      Stokeslet3D or LaplaceKernel3D (the whole kernel), direct sums for any other callable;
 #   2. the local corrections, built once;
 #   3. the bookkeeping: target sets (:area, :boundary, or points; several at once share one fast sum), the unweighted
 #      copy of the mesh for smooth densities given as physical values (`density = :smooth`; `:stored` takes the
@@ -134,8 +135,8 @@ for the density `f` at the source nodes (scalars or `Vec2`, by `kernel_shape(K)`
 matrix of a direct-sum evaluator.
 - `density`: `:stored` takes the mesh's own values (edge-weighted on its weighted panels); `:smooth` physical nodal
   values of a smooth density, integrated on the unweighted copy of the mesh.
-- `fast`: `:auto` (by the kernel's type: Ewald for `Stokeslet3D` and `LaplaceKernel3D`, FMM2D for the 2D kernels),
-  `:ewald`, `:fmm`, `:direct`.
+- `fast`: `:auto` (by the kernel's type: Ewald for `Stokeslet3D`, `LaplaceKernel3D` and a `SymbolKernel` of either
+  base, FMM2D for the 2D kernels, direct sums for other callables), `:ewald`, `:fmm`, `:direct`.
 - `remainder`: a `SymbolKernel` added to `K` (head of src/evaluators/evaluator.jl); for `Stokeslet3D` at
   μ = 1 (scaled with `K`), into Ewald's multiplier; for `LaplaceKernel3D` and `BiharmonicGradient2D` without a far
   field, a local sum over the pairs closer than ρc (where the kernel's tail falls below `eps`).
@@ -271,6 +272,27 @@ function _radial_far(kind, out, src, trg, k, eps)
     X = reduce(vcat, trg)
     kw = (; k, out=out in (:gradient, :normal) ? :gradient : :value, nd=out === :bgrad ? 3 : 1, tol=eps)
     _RadialEwaldFar(length(trg) == 1 && X == src ? RadialEwald2D(kind, src; kw...) : RadialEwald2D(kind, src, X; kw...), out)
+end
+# a SymbolKernel as the kernel itself (base Stokeslet3D or LaplaceKernel3D): Ewald of the whole kernel, its remainder
+# split by weight (any decay; src/kernels/ewald.jl), coincident pairs skipped as by the direct sum
+function _area_far(K::SymbolKernel, R, fast, plan, src, trg, self, C, eps)
+    R === nothing || throw(ArgumentError("Evaluator: no remainder for $(typeof(K))"))
+    fast in (:auto, :ewald, :direct) ||
+        throw(ArgumentError("Evaluator: fast = :auto, :ewald or :direct for a SymbolKernel"))
+    ok = K.base isa Stokeslet3D ? K.tensor : K.base isa LaplaceKernel3D && !K.tensor && :value in K.outputs
+    if fast === :direct || !ok
+        fast === :ewald && throw(ArgumentError("Evaluator: Ewald sums a SymbolKernel with base Stokeslet3D (tensor) " *
+                                               "or LaplaceKernel3D (scalar, with :value)"))
+        return _DirectFar()
+    end
+    X = reduce(vcat, trg)
+    if K.base isa Stokeslet3D
+        length(trg) == 1 || throw(ArgumentError("Evaluator: one target set for a Stokes SymbolKernel under Ewald"))
+        return _EwaldFar(self ? EwaldStokes3D(src; μ_3D=K.base.μ, remainder=K, whole=true, tol=eps) :
+                                EwaldStokes3D(src, X; μ_3D=K.base.μ, remainder=K, whole=true, tol=eps))
+    end
+    _EwaldLaplaceFar(length(trg) == 1 && X == src ? EwaldLaplace3D(src; remainder=K, tol=eps) :
+                                                  EwaldLaplace3D(src, X; remainder=K, tol=eps))
 end
 function _area_far(K, R, fast, plan, src, trg, self, C, eps)
     R === nothing || throw(ArgumentError("Evaluator: no remainder for $(typeof(K))"))

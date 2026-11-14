@@ -107,6 +107,41 @@ OpenSurfaces.kernel_shape(::MyStokeslet) = (2, 2)
     @test Evaluator(MHNormalKernel(2.0, bd.n), ad; fast=:direct, targets=bd.x) isa Evaluator
 end
 
+@testset "a SymbolKernel as the kernel: Ewald of the whole kernel against its direct sum, tol 1e-6" begin
+    # remainders that decay exponentially (the exact pairs) and algebraically (screened kernels, R with a cone at
+    # ρ = 0): the remainder split by weight between the long and the short range (src/kernels/ewald.jl)
+    tol = 1e-6; p = 10
+    bd, ad, _ = build_mesh(discretize_curve(θ -> Vec2(1.5cos(θ), 0.75sin(θ)), p; tol=1e-6), p)
+    F = [Vec2(cos(x[2]), x[1]) for x in ad.x]; g = [1 + x[1] - x[2]^2 for x in ad.x]
+    κ = 4.0; Δ(k) = (s = sqrt(k^2 + κ^2); -κ^2 / (2k * s * (k + s)))
+    Ks = @test_logs (:warn,) match_mode=:any SymbolKernel(k -> 1 / (2sqrt(k^2 + κ^2)); base=LaplaceKernel3D(),
+                                                          scale=1 / κ, outputs=(:value,), remainder=Δ, tol)
+    Kt = @test_logs (:warn,) match_mode=:any SymbolKernel(k -> (1 / sqrt(k^2 + κ^2), 1 / (2sqrt(k^2 + κ^2)));
+                                                          base=Stokeslet3D(), scale=1 / κ, tol)
+    for (name, K, f, kw) in (("scalar, algebraic", Ks, g, (; density=:smooth)),
+                             ("scalar, algebraic, area + boundary", Ks, g, (; targets=(:area, :boundary), bd)),
+                             ("scalar, exponential", scalarK(outputs=(:value,)), g, (;)),
+                             ("tensor, algebraic", Kt, F, (;)),
+                             ("tensor, algebraic, points", Kt, F, (; targets=ad.x[1:7:end])),
+                             ("tensor, exponential", tensorK(), F, (;)))
+        E = Evaluator(K, ad; tol, kw...)
+        @test E.far isa Union{OpenSurfaces._EwaldFar,OpenSurfaces._EwaldLaplaceFar}
+        a = E(f); b = Evaluator(K, ad; fast=:direct, tol, kw...)(f)
+        e = a isa Tuple ? maximum(relmax(x, y) for (x, y) in zip(a, b)) : relmax(a, b)
+        @printf("SymbolKernel %-36s Ewald − direct %.1e\n", name, e)
+        @test e < tol
+    end
+    # a tensor SymbolKernel's (α, β) with β ~ 1/ρ at ρ = 0 (an algebraic remainder): β ρ² smooth, β r rᵀ → 0
+    βρ2 = [(ρ = 10.0^-j; kernel_remainder(Kt, ρ)[2] * ρ^2) for j in 2:4]
+    @test isapprox(βρ2[2] / βρ2[1], 0.1; rtol=0.05) && isapprox(βρ2[3] / βρ2[2], 0.1; rtol=0.05)
+    @test kernel_remainder(Kt, 0.0)[2] == 0
+    @test_throws ArgumentError Evaluator(Kt, ad; fast=:fmm)
+    # a table that covers the film (diameter 3) but not the long-range window: Ewald refuses it
+    Kshort = @test_logs (:warn,) match_mode=:any SymbolKernel(k -> (1 / sqrt(k^2 + κ^2), 1 / (2sqrt(k^2 + κ^2)));
+                                                              base=Stokeslet3D(), scale=1 / κ, tol, ρc=3.1)
+    @test_throws ArgumentError Evaluator(Kshort, ad)
+end
+
 @testset "line sources with targets on Γ" begin
     # targets on Γ, at nodes and between them (not NaN). On a circle of radius R: (1/2π) ∫ log|x − y| dΓ_y = R log R and,
     # on the unit circle, of cos 2θ: −cos(2θ)/4; the modified Helmholtz kernel against adaptive quadrature in θ

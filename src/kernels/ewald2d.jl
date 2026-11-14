@@ -75,8 +75,9 @@ end
     _stress_terms(r, -e / σ^2, -e / σ^2, (-2g / (2π) + 2e) / (ρ2 * σ^2))
 end
 
-"""Sample a windowed kernel (ncomp components) on the periodic grid and FFT it."""
-function _windowed_fft(kfun, ncomp::Int, M, P, L, rc, σ)
+"""Sample a windowed kernel (ncomp components) on the periodic grid and FFT it (zero where the window is below
+`wmin`, without calling `kfun` there)."""
+function _windowed_fft(kfun, ncomp::Int, M, P, L, rc, σ; wmin::Real=0.0)
     hx = P[1] / M[1]; hy = P[2] / M[2]
     K = zeros(ComplexF64, M[1], M[2], ncomp)
     Threads.@threads for b in 0:M[2]-1
@@ -85,8 +86,9 @@ function _windowed_fft(kfun, ncomp::Int, M, P, L, rc, σ)
         for a in 0:M[1]-1
             rx = (a < M[1] ÷ 2 ? a : a - M[1]) * hx
             wx = erfc((abs(rx) - L[1] - rc) / σ) / 2
-            v = kfun(Vec2(rx, ry))
             W = wx * wy
+            W < wmin && continue
+            v = kfun(Vec2(rx, ry))
             for c in 1:ncomp
                 K[a+1, b+1, c] = W * v[c]
             end
