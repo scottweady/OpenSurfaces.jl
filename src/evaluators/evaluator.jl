@@ -137,8 +137,8 @@ matrix of a direct-sum evaluator.
 - `density`: `:stored` takes the mesh's own values (edge-weighted on its weighted panels); `:smooth` physical nodal
   values of a smooth density, integrated on the unweighted copy of the mesh.
 - `fast`: `:auto` (by the kernel's type: Ewald for `Stokeslet3D`, `LaplaceKernel3D`, `StokesKernel` and a
-  `SymbolKernel` of either 3D base, FMM2D for the 2D kernels, direct sums for other callables), `:ewald`, `:fmm`,
-  `:direct`.
+  `SymbolKernel` of either 3D base, but the direct sum below about 2000 targets at eps 1e-6, 12000 at 1e-10;
+  FMM2D for the 2D kernels; direct sums for other callables), `:ewald`, `:fmm`, `:direct`.
 - `remainder`: a `SymbolKernel` added to `K` (head of src/evaluators/evaluator.jl); for `Stokeslet3D` at
   μ = 1 (scaled with `K`), into Ewald's multiplier; for `LaplaceKernel3D` and `BiharmonicGradient2D` without a far
   field, a local sum over the pairs closer than ρc (where the kernel's tail falls below `eps`).
@@ -221,9 +221,18 @@ function Evaluator(K, bd::BoundaryDisc; targets, fast::Symbol=:auto, tol::Real=D
     Evaluator(K, nothing, sh, bd.x, bd.w, nothing, nothing, nothing, trg, C, far, Float64(eps))
 end
 
+# `fast = :auto` with few targets: the direct sum. An Ewald apply costs about a·N_src whatever the targets (its grid
+# grows with the sources), the direct sum b·N_src·N_trg, so the crossover is a number of targets, and it grows with
+# the accuracy (the grid's points per σ). Measured on 13.9k sources, 16 threads (WORKLOG 2026-11-14), for the 3D
+# Laplace kernel, Stokeslet3D, StokesKernel and a scalar SymbolKernel: 1000–2000 targets at eps 1e-6, 8000–20000 at
+# 1e-10.
+_direct_targets(eps) = 2000 * (log10(1 / eps) / 6)^3.5
+_few_targets(trg, eps) = sum(length, trg) < _direct_targets(eps)
+
 # the fast sum of area sources, by kernel
 function _area_far(K::Stokeslet3D, R, fast, plan, src, trg, self, C, eps)
     length(trg) == 1 || throw(ArgumentError("Evaluator: one target set for Stokeslet3D"))
+    fast === :auto && plan === nothing && _few_targets(trg, eps) && (fast = :direct)
     if fast === :direct                  # with a remainder: the direct sum of G3 + R/μ (`_far_apply(::_DirectFar)`)
         R === nothing || R.decay !== :algebraic ||
             throw(ArgumentError("Evaluator: Stokeslet3D's corrections are the Stokeslet's, which an algebraically " *
@@ -250,6 +259,7 @@ function _area_far(K::Union{LaplaceKernel3D,BiharmonicGradient2D}, R, fast, plan
     end
     fast === :direct && return _DirectFar()
     K isa BiharmonicGradient2D && return fast === :ewald ? _radial_far(:log, :bgrad, src, trg, 0.0, eps) : _RFMM2DFar(:bgrad)
+    fast === :auto && plan === nothing && _few_targets(trg, eps) && return _DirectFar()
     fast in (:auto, :ewald, :fmm) || throw(ArgumentError("Evaluator: fast = :auto, :ewald, :fmm or :direct for LaplaceKernel3D"))
     fast === :fmm && plan === nothing && return _FMM3DLaplaceFar()
     plan === nothing || plan isa EwaldLaplace3D ||
@@ -282,7 +292,7 @@ function _area_far(K::SymbolKernel, R, fast, plan, src, trg, self, C, eps)
     fast in (:auto, :ewald, :direct) ||
         throw(ArgumentError("Evaluator: fast = :auto, :ewald or :direct for a SymbolKernel"))
     ok = K.base isa Stokeslet3D ? K.tensor : K.base isa LaplaceKernel3D && !K.tensor && :value in K.outputs
-    if fast === :direct || !ok
+    if fast === :direct || !ok || (fast === :auto && _few_targets(trg, eps))
         fast === :ewald && throw(ArgumentError("Evaluator: Ewald sums a SymbolKernel with base Stokeslet3D (tensor) " *
                                                "or LaplaceKernel3D (scalar, with :value)"))
         return _DirectFar()
@@ -300,7 +310,8 @@ end
 function _area_far(K::StokesKernel, R, fast, plan, src, trg, self, C, eps)
     R === nothing || throw(ArgumentError("Evaluator: no remainder for StokesKernel (use Stokeslet3D with a remainder)"))
     fast in (:auto, :ewald, :direct) || throw(ArgumentError("Evaluator: fast = :auto, :ewald or :direct for StokesKernel"))
-    (fast === :direct || !(isfinite(K.μ_2D) || isfinite(K.μ_3D))) && return _DirectFar()
+    (fast === :direct || !(isfinite(K.μ_2D) || isfinite(K.μ_3D)) || (fast === :auto && _few_targets(trg, eps))) &&
+        return _DirectFar()
     length(trg) == 1 || throw(ArgumentError("Evaluator: one target set for StokesKernel under Ewald"))
     _EwaldFar(self ? EwaldStokes3D(src; μ_3D=K.μ_3D, μ_2D=K.μ_2D, tol=eps) :
                      EwaldStokes3D(src, trg[1]; μ_3D=K.μ_3D, μ_2D=K.μ_2D, tol=eps))

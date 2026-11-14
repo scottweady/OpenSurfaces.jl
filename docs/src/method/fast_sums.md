@@ -14,6 +14,19 @@ An `Evaluator` picks the sum by the kernel's type:
 | `SymbolKernel` of base `Stokeslet3D` or `LaplaceKernel3D` | Ewald + NUFFT of the whole kernel (default) |
 | any other | direct |
 
+With few targets the default is the direct sum instead, for every kernel above summed by Ewald by default: an Ewald
+sum costs about the same whatever the number of targets (its grid grows with the sources), while the direct sum
+grows with sources × targets, so below a number of targets the direct sum wins. That number grows with the
+accuracy; `fast = :auto` takes the direct sum below
+
+```math
+M^*(\text{eps}) = 2000\,\bigl(\log_{10}(1/\text{eps})/6\bigr)^{3.5}
+```
+
+targets in all (about 2000 at eps 1e-6, 5500 at 1e-8, 12000 at 1e-10), the crossovers measured on 13.9k sources and
+16 threads (1000–2000 targets at 1e-6, 8000–20000 at 1e-10 across these kernels). A boundary's nodes as targets are
+then summed directly. `fast = :ewald` (or a `plan`) keeps Ewald.
+
 The defaults follow timings on 16 threads (studies/laplace_ewald). For the 3D Laplace kernel an Ewald apply is 4–15
 times faster than FMM3D from 8.8k to 410k nodes (0.058 s against 0.6 s at 110k nodes, eps 1e-6), and its setup costs
 about one FMM3D apply. For the 2D kernels FMM2D is as fast or faster at the same error (its error runs about 1e-4 ×
@@ -61,7 +74,7 @@ the kernel splits as
 
 With a finite `μ_2D`, `EwaldStokes3D` sums ``G_2 + G_3`` (`StokesKernel`) on one grid, the 2D Stokeslet split as in
 `FilmEwald` below; its long-range value at coincident pairs adds ``(1 + \gamma_E/2 - \log\sigma)/(4\pi\mu_{2D})``.
-With few targets (a boundary's nodes) the direct sum is faster: the grid costs the same however few the targets.
+With few targets (a boundary's nodes) the direct sum is faster, and `fast = :auto` takes it (above).
 
 `EwaldLaplace3D` is the same split for the 3D Laplace kernel ``1/(4\pi\rho)``: a scalar multiplier, one NUFFT pair
 per sum, and the self value ``\phi_L(0)/4\pi`` subtracted at coincident pairs.

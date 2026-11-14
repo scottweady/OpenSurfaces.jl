@@ -124,7 +124,7 @@ end
                              ("tensor, algebraic", Kt, F, (;)),
                              ("tensor, algebraic, points", Kt, F, (; targets=ad.x[1:7:end])),
                              ("tensor, exponential", tensorK(), F, (;)))
-        E = Evaluator(K, ad; tol, kw...)
+        E = Evaluator(K, ad; fast=:ewald, tol, kw...)
         @test E.far isa Union{OpenSurfaces._EwaldFar,OpenSurfaces._EwaldLaplaceFar}
         a = E(f); b = Evaluator(K, ad; fast=:direct, tol, kw...)(f)
         e = a isa Tuple ? maximum(relmax(x, y) for (x, y) in zip(a, b)) : relmax(a, b)
@@ -150,13 +150,26 @@ end
     for (μ2, μ3) in ((1.0, 2.0), (0.3, Inf), (Inf, 2.0)), (name, kw) in (("area", (;)), ("points", (; targets=pts)),
                                                                         ("boundary", (; targets=:boundary, bd)))
         K = OpenSurfaces.StokesKernel(μ2, μ3)
-        E = Evaluator(K, ad; tol, kw...)
+        E = Evaluator(K, ad; fast=:ewald, tol, kw...)          # (:auto takes the direct sum for few targets)
         @test E.far isa OpenSurfaces._EwaldFar
         e = relmax(E(F), Evaluator(K, ad; fast=:direct, tol, kw...)(F))
         @printf("StokesKernel(%s, %s) %-8s Ewald − direct %.1e\n", μ2, μ3, name, e)
         @test e < tol
     end
-    @test_throws ArgumentError Evaluator(OpenSurfaces.StokesKernel(1.0, 2.0), ad; targets=(:area, :boundary), bd)
+    @test_throws ArgumentError Evaluator(OpenSurfaces.StokesKernel(1.0, 2.0), ad; fast=:ewald, targets=(:area, :boundary), bd)
+    # fast = :auto: Ewald for many targets, the direct sum below OpenSurfaces._direct_targets(eps) (2000 at 1e-6,
+    # about 12000 at 1e-10); an explicit fast = :ewald or a plan keeps Ewald
+    half = ad.x[1:2:end]                               # 6950 targets: Ewald at eps 1e-6, direct at 1e-10
+    @test length(bd.x) < OpenSurfaces._direct_targets(tol) < length(half) < OpenSurfaces._direct_targets(1e-10)
+    for K in (Stokeslet3D(), LaplaceKernel3D(), OpenSurfaces.StokesKernel(1.0, 2.0))
+        far(; kw...) = Evaluator(K, ad; tol, kw...).far
+        @test far(; targets=:boundary, bd) isa OpenSurfaces._DirectFar
+        @test !(far(; targets=half) isa OpenSurfaces._DirectFar)
+        @test far(; targets=half, eps=1e-10) isa OpenSurfaces._DirectFar
+        @test !(far(; targets=:boundary, bd, fast=:ewald) isa OpenSurfaces._DirectFar)
+    end
+    @test Evaluator(Stokeslet3D(), ad; targets=:boundary, bd, plan=EwaldStokes3D(ad.x, bd.x; tol), tol).far isa
+          OpenSurfaces._EwaldFar
     @test_throws ArgumentError Evaluator(OpenSurfaces.StokesKernel(1.0, 2.0), ad; fast=:fmm)
 end
 
