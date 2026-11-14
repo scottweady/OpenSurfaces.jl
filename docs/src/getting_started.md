@@ -98,7 +98,7 @@ U = Evaluator(Stokeslet3D(), ad)(F)                        # (3/16, 0) at every 
 | `LaplaceKernel3D()` | ``1/(4\pi\rho)`` | Ewald + NUFFT, or FMM3D |
 | `LaplaceKernel2D()`, `LaplaceGradient2D()`, `BiharmonicGradient2D(; κ, R)` | ``\log\rho/2\pi``, its gradient, the gradient of the biharmonic kernel | FMM2D, or Ewald + NUFFT |
 | `MHKernel(k)`, `MHNormalKernel(k, normals)` | ``K_0(k\rho)/2\pi`` and its normal derivative at the targets | FMM2D (Helmholtz at ``ik``), or Ewald + NUFFT |
-| `OpenSurfaces.StokesKernel(μ_2D, μ_3D)` | the 2D Stokeslet `G2` plus `G3` | direct |
+| `OpenSurfaces.StokesKernel(μ_2D, μ_3D)` | the 2D Stokeslet `G2` plus `G3` | Ewald + NUFFT (one target set) |
 | any callable `K(r)` or `K(i, r)` | your kernel | direct |
 | `SymbolKernel` | a kernel from its Fourier symbol (below) | as `remainder` of its base: the base's; as the kernel itself: Ewald + NUFFT of the whole kernel (base `Stokeslet3D` or `LaplaceKernel3D`, any decay), else direct |
 

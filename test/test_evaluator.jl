@@ -142,6 +142,24 @@ end
     @test_throws ArgumentError Evaluator(Kshort, ad)
 end
 
+@testset "StokesKernel (G2 + G3) by Ewald against its direct sum, tol 1e-6" begin
+    tol = 1e-6; p = 10
+    bd, ad, _ = build_mesh(discretize_curve(θ -> Vec2(1.5cos(θ), 0.75sin(θ)), p; tol=1e-6), p)
+    F = [Vec2(cos(x[2]), x[1]) for x in ad.x]
+    pts = vcat(ad.x[1:5:end], [Vec2(0.1, 0.2)])        # explicit targets, most of them on area nodes
+    for (μ2, μ3) in ((1.0, 2.0), (0.3, Inf), (Inf, 2.0)), (name, kw) in (("area", (;)), ("points", (; targets=pts)),
+                                                                        ("boundary", (; targets=:boundary, bd)))
+        K = OpenSurfaces.StokesKernel(μ2, μ3)
+        E = Evaluator(K, ad; tol, kw...)
+        @test E.far isa OpenSurfaces._EwaldFar
+        e = relmax(E(F), Evaluator(K, ad; fast=:direct, tol, kw...)(F))
+        @printf("StokesKernel(%s, %s) %-8s Ewald − direct %.1e\n", μ2, μ3, name, e)
+        @test e < tol
+    end
+    @test_throws ArgumentError Evaluator(OpenSurfaces.StokesKernel(1.0, 2.0), ad; targets=(:area, :boundary), bd)
+    @test_throws ArgumentError Evaluator(OpenSurfaces.StokesKernel(1.0, 2.0), ad; fast=:fmm)
+end
+
 @testset "line sources with targets on Γ" begin
     # targets on Γ, at nodes and between them (not NaN). On a circle of radius R: (1/2π) ∫ log|x − y| dΓ_y = R log R and,
     # on the unit circle, of cos 2θ: −cos(2θ)/4; the modified Helmholtz kernel against adaptive quadrature in θ

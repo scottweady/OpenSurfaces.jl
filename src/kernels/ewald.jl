@@ -46,6 +46,7 @@ end
 
 struct EwaldStokes3D
     μ_3D::Float64
+    μ_2D::Float64                          # Inf: no 2D Stokeslet
     σ::Float64
     rc::Float64
     c0::Vec2
@@ -77,10 +78,18 @@ small enough for the grid to resolve it on its `scale`.
 
 `whole = true`: `remainder` is a tensor `SymbolKernel` K with base `Stokeslet3D(; μ_3D)` (its remainder in absolute
 units, any decay), and the plan sums K itself, coincident pairs skipped (R split by weight, `_split_w`).
+
+`μ_2D` (finite): the plan sums G2(·; μ_2D) + G3(·; μ_3D) (`StokesKernel`), the 2D Stokeslet split by Hasimoto's
+screening as in `FilmEwald`; `μ_3D = Inf` then leaves G2 alone.
 """
 function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, remainder=nothing, tol::Real=DEFAULT_TOL,
-                       σ=nothing, nneigh::Real=150, whole::Bool=false, nthreads::Int=Threads.nthreads())
+                       σ=nothing, nneigh::Real=150, whole::Bool=false, μ_2D::Real=Inf,
+                       nthreads::Int=Threads.nthreads())
     tm = Dict{Symbol,Float64}()
+    has2d = isfinite(μ_2D)
+    has2d || isfinite(μ_3D) || throw(ArgumentError("EwaldStokes3D: μ_3D = Inf needs a finite μ_2D"))
+    isfinite(μ_3D) || remainder === nothing || throw(ArgumentError("EwaldStokes3D: a remainder needs a finite μ_3D"))
+    has2d && whole && throw(ArgumentError("EwaldStokes3D: whole = true with a 2D Stokeslet is not implemented"))
     if whole
         remainder isa SymbolKernel && remainder.tensor && remainder.base isa Stokeslet3D ||
             throw(ArgumentError("EwaldStokes3D: whole = true takes a tensor SymbolKernel with base Stokeslet3D"))
@@ -94,7 +103,8 @@ function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, 
     lo = reduce((a, b) -> min.(a, b), allp); hi = reduce((a, b) -> max.(a, b), allp)
     c0 = (lo + hi) / 2
     L = max.(hi - lo, 1e-12)
-    c = max(erfcinv(tol), 3.0)
+    # (the 2D short range decays like e^{−ρ²/σ²}, as FilmEwald)
+    c = has2d ? max(erfcinv(tol), sqrt(log(1 / tol)), 3.0) : max(erfcinv(tol), 3.0)
     # (a new binding: reassigning the keyword would box it in the kernel closures below)
     σ0 = σ === nothing ? _calibrate_sigma(src, T, c, nneigh, sqrt(nneigh / (π * length(src) / (L[1] * L[2]))) / c) :
                          Float64(σ)
@@ -107,7 +117,7 @@ function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, 
     # window w(t; ℓ) = ½ erfc((|t| − ℓ − cσs)/σs): 1 − O(tol) for |t| ≤ ℓ, O(tol) beyond ℓ + 2cσs
     S = L .+ 2rc
     P = Tuple(2 .* S)
-    h = π * σs / (2c) / (whole ? _split_h(RH) : 1.0)
+    h = π * σs / (2(has2d ? c + 1 : c)) / (whole ? _split_h(RH) : 1.0)   # (+1: the 2D multiplier's polynomial factor)
     M = ntuple(d -> 2 * ceil(Int, P[d] / (2h)), 2)
     hx = P[1] / M[1]; hy = P[2] / M[2]
     tm[:multiplier] = @elapsed begin
@@ -121,6 +131,11 @@ function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, 
                 r = Vec2(rx, ry); ρ = norm(r)
                 φ, dφ = _phiL(ρ, σs)
                 k11, k12, k22 = _Kphi(r, φ, dφ, ρ)
+                if has2d                           # G2's long range, in the units of 4πμ_3D G3 (or alone)
+                    s11, s12, s22 = _S2L(r, σs)
+                    a3 = isfinite(μ_3D) ? 1.0 : 0.0; a2 = isfinite(μ_3D) ? μ_3D / μ_2D : 1.0
+                    k11 = a3 * k11 + a2 * s11; k12 = a3 * k12 + a2 * s12; k22 = a3 * k22 + a2 * s22
+                end
                 W = wx * wy
                 if RH !== nothing && W >= wmin     # 4π R_H at μ = 1 (whole: 4πμ_3D w R) (scaled by 1/(4πμ_3D) below)
                     r11, r12, r22 = remainder_tensor(RH, r)
@@ -132,7 +147,7 @@ function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, 
         end
         FFTW.fft!(K, (1, 2))
         # u = (1/(P₁P₂)) Σ_m K̂(k_m) F_m e^{i k_m x} / (4πμ_3D),  K̂ ≈ h₁h₂ · FFT(samples)
-        Khat = real.(K) .* (hx * hy / (P[1] * P[2] * 4π * μ_3D))
+        Khat = real.(K) .* (hx * hy / (P[1] * P[2] * 4π * (isfinite(μ_3D) ? μ_3D : μ_2D)))
     end
     tm[:plans] = @elapsed begin
         sx = [2π * (p[1] - c0[1]) / P[1] for p in src]; sy = [2π * (p[2] - c0[2]) / P[2] for p in src]
@@ -143,15 +158,20 @@ function EwaldStokes3D(src::AbstractVector{Vec2}, trg=nothing; μ_3D::Real=1.0, 
         plan2 = FINUFFT.finufft_makeplan(2, [M[1], M[2]], +1, 2, ntol; modeord=1, nthreads=nthreads)
         FINUFFT.finufft_setpts!(plan2, tx, ty)
     end
-    c8 = 1 / (4π * μ_3D)
-    tm[:shortrange] = @elapsed Ssr = whole ?
+    c8 = isfinite(μ_3D) ? 1 / (4π * μ_3D) : 0.0
+    c2 = has2d ? 1 / (4π * μ_2D) : 0.0
+    tm[:shortrange] = @elapsed Ssr = has2d ?
+        _sr_matrix(src, T, selfmode, rc, (i, r) -> (ρ = norm(r); (φ, dφ) = _phiS(ρ, σs);
+                                                     c8 .* _Kphi(r, φ, dφ, ρ) .+ c2 .* _S2S(r, σs))) : whole ?
         _sr_matrix(src, T, selfmode, max(rc, _split_rc(σs, tol)),
                    (i, r) -> (ρ = norm(r); (φ, dφ) = _phiS(ρ, σs); ws = _split_tail((ρ / σs)^2);
                               c8 .* _Kphi(r, φ, dφ, ρ) .+ ws .* remainder_tensor(RH, r))) :
         _sr_matrix(src, T, selfmode, rc, (i, r) -> (ρ = norm(r); (φ, dφ) = _phiS(ρ, σs); c8 .* _Kphi(r, φ, dφ, ρ)))
-    kl0 = (2 / (σs * sqrt(π))) * (erfc((-L[1] - rc) / σs) / 2) * (erfc((-L[2] - rc) / σs) / 2) / (4π * μ_3D)
+    W0 = (erfc((-L[1] - rc) / σs) / 2) * (erfc((-L[2] - rc) / σs) / 2)
+    kl0 = has2d ? W0 * (c2 * (1 + _γE / 2 - log(σs)) + c8 * 2 / (σs * sqrt(π))) :
+                  (2 / (σs * sqrt(π))) * (erfc((-L[1] - rc) / σs) / 2) * (erfc((-L[2] - rc) / σs) / 2) / (4π * μ_3D)
     selfcoef = selfmode ? kl0 : 0.0
-    EwaldStokes3D(Float64(μ_3D), σs, rc, c0, P, M, Khat, plan1, plan2, length(src), length(T),
+    EwaldStokes3D(Float64(μ_3D), Float64(μ_2D), σs, rc, c0, P, M, Khat, plan1, plan2, length(src), length(T),
                   selfmode, Ssr, selfcoef, _coincident_pairs(src, T, selfmode), kl0, tm)
 end
 

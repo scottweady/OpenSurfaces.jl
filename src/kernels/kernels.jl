@@ -67,7 +67,8 @@ end
 # site, so the same kernel written as closures at eight sites was compiled eight times (precompile time).
 
 """Single-layer kernel G2(r; μ_2D) + G3(r; μ_3D); an infinite viscosity drops that term. G3 is the half-space
-Stokeslet (`G3`); for an unbounded fluid of viscosity μ_f, pass μ_3D = 2μ_f."""
+Stokeslet (`G3`); for an unbounded fluid of viscosity μ_f, pass μ_3D = 2μ_f. An `Evaluator` sums it by Ewald
+(`EwaldStokes3D` with `μ_2D`)."""
 struct StokesKernel
     μ_2D::Float64
     μ_3D::Float64

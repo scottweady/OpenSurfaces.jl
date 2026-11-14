@@ -10,6 +10,7 @@ An `Evaluator` picks the sum by the kernel's type:
 | `LaplaceKernel3D` | Ewald + NUFFT (`EwaldLaplace3D`; default), or FMM3D (`fast = :fmm`) |
 | `LaplaceKernel2D`, `LaplaceGradient2D`, `BiharmonicGradient2D` | FMM2D (Laplace; default), or Ewald + NUFFT (`RadialEwald2D`, `fast = :ewald`) |
 | `MHKernel`, `MHNormalKernel` | FMM2D (Helmholtz at the imaginary wavenumber ``ik``; default), or Ewald + NUFFT (`RadialEwald2D`, `fast = :ewald`) |
+| `StokesKernel(μ_2D, μ_3D)` (G2 + G3) | Ewald + NUFFT (`EwaldStokes3D` with `μ_2D`; default) |
 | `SymbolKernel` of base `Stokeslet3D` or `LaplaceKernel3D` | Ewald + NUFFT of the whole kernel (default) |
 | any other | direct |
 
@@ -57,6 +58,10 @@ the kernel splits as
 
 ``\sigma`` is chosen for about `nneigh` (150) short-range neighbors per target. A smooth remainder (a
 `SymbolKernel`, below) is added to the long-range multiplier.
+
+With a finite `μ_2D`, `EwaldStokes3D` sums ``G_2 + G_3`` (`StokesKernel`) on one grid, the 2D Stokeslet split as in
+`FilmEwald` below; its long-range value at coincident pairs adds ``(1 + \gamma_E/2 - \log\sigma)/(4\pi\mu_{2D})``.
+With few targets (a boundary's nodes) the direct sum is faster: the grid costs the same however few the targets.
 
 `EwaldLaplace3D` is the same split for the 3D Laplace kernel ``1/(4\pi\rho)``: a scalar multiplier, one NUFFT pair
 per sum, and the self value ``\phi_L(0)/4\pi`` subtracted at coincident pairs.

@@ -12,7 +12,7 @@ T = traction_self_matrix(bd)                                  # its interior tra
 ν = interleave(bd.n)
 # interior targets down to 1e-6 from Γ (along −n at every 7th node) and a few deep inside
 X = [[bd.x[i] - d * bd.n[i] for i in 1:7:length(bd) for d in (1e-2, 1e-4, 1e-6)]; [Vec2(0, 0), Vec2(0.3, -0.2)]]
-uX = Evaluator(OpenSurfaces.StokesKernel(1.0, Inf), bd; targets=X, tol)(bd.n)  # corrected smooth rule + FMM2D
+uX = Evaluator(OpenSurfaces.StokesKernel(1.0, Inf), bd; targets=X, tol)(bd.n)  # corrected smooth rule + direct sum
 @printf("star, %d panels, %d nodes: S[n] on Γ %.1e, inside (%d targets) %.1e; traction of S[n] − n %.1e\n",
         npanels(bd), length(bd), maximum(abs, A * ν), length(X), maximum(norm, uX), maximum(abs, T * ν - ν))
 for a in (0.5, 2.0)
