@@ -7,10 +7,16 @@ An `Evaluator` picks the sum by the kernel's type:
 | Kernel | Sum |
 |:--|:--|
 | `Stokeslet3D` | Ewald + NUFFT (`EwaldStokes3D`; default), or FMM3D (`fast = :fmm`) |
-| `LaplaceKernel3D` | FMM3D (Laplace) |
-| `LaplaceKernel2D`, `LaplaceGradient2D`, `BiharmonicGradient2D` | FMM2D (Laplace) |
-| `MHKernel`, `MHNormalKernel` | FMM2D (Helmholtz at the imaginary wavenumber ``ik``) |
+| `LaplaceKernel3D` | Ewald + NUFFT (`EwaldLaplace3D`; default), or FMM3D (`fast = :fmm`) |
+| `LaplaceKernel2D`, `LaplaceGradient2D`, `BiharmonicGradient2D` | FMM2D (Laplace; default), or Ewald + NUFFT (`RadialEwald2D`, `fast = :ewald`) |
+| `MHKernel`, `MHNormalKernel` | FMM2D (Helmholtz at the imaginary wavenumber ``ik``; default), or Ewald + NUFFT (`RadialEwald2D`, `fast = :ewald`) |
+| `SymbolKernel` of base `Stokeslet3D` or `LaplaceKernel3D` | Ewald + NUFFT of the whole kernel (default) |
 | any other | direct |
+
+The defaults follow timings on 16 threads (studies/laplace_ewald). For the 3D Laplace kernel an Ewald apply is 4–15
+times faster than FMM3D from 8.8k to 410k nodes (0.058 s against 0.6 s at 110k nodes, eps 1e-6), and its setup costs
+about one FMM3D apply. For the 2D kernels FMM2D is as fast or faster at the same error (its error runs about 1e-4 ×
+eps), so it stays the default there.
 
 `eps` sets the accuracy of the sum (default `tol`). The FMMs take it per call, `E(f; eps)`; an Ewald plan and the
 local sum of a remainder fix it when they are built.
@@ -51,6 +57,37 @@ the kernel splits as
 
 ``\sigma`` is chosen for about `nneigh` (150) short-range neighbors per target. A smooth remainder (a
 `SymbolKernel`, below) is added to the long-range multiplier.
+
+`EwaldLaplace3D` is the same split for the 3D Laplace kernel ``1/(4\pi\rho)``: a scalar multiplier, one NUFFT pair
+per sum, and the self value ``\phi_L(0)/4\pi`` subtracted at coincident pairs.
+
+## A whole kernel from its symbol
+
+A `SymbolKernel` used as the kernel itself, of base `Stokeslet3D` or `LaplaceKernel3D`, is summed whole by the
+base's Ewald split plus its remainder ``R``, of any decay. ``R`` may have a cone or a logarithm at ``\rho = 0`` (an
+algebraically decaying remainder), which a long-range multiplier cannot sample, so it is split by a weight,
+
+```math
+R = \underbrace{w R}_{\text{long range}} + \underbrace{(1 - w) R}_{\text{short range}},\qquad
+w(\rho) = P(m, U) = 1 - e^{-U}\sum_{j<m} \frac{U^j}{j!},\quad U = \rho^2/\sigma^2,\ m = 4.
+```
+
+``w`` is a sum of Gaussians of width ``\sigma`` times polynomials, so the grid of the base's split resolves it, and
+``w \sim U^m/m!`` at ``\rho = 0`` cancels a cone of ``R`` to order ``2m``. Its leftover Fourier tail is why an
+algebraic remainder takes a grid twice as fine. ``(1 - w) R`` decays like ``e^{-U}U^{m-1}``; the short range runs out
+to where it is below `tol`. Coincident pairs are skipped (``w R`` vanishes there), as in the direct sum of the whole
+kernel, whose near corrections hold its singular part. The remainder's table (or its far field) must reach the
+long-range window, the point set's extent plus about ``11\sigma``; the plan refuses it otherwise.
+
+## Ewald splitting for the 2D kernels
+
+`RadialEwald2D` sums ``\log\rho/2\pi`` and ``K_0(k\rho)/2\pi`` (values, several densities at once, or gradients).
+Both are heat-kernel integrals, ``\frac{1}{4\pi}\int_0^\infty e^{-sk^2 - \rho^2/4s}\,ds/s`` up to sign and a constant,
+split at ``s = \sigma^2/4``: the long range has the Fourier transform ``e^{-\sigma^2(k^2 + |\xi|^2)/4}/(k^2 + |\xi|^2)``
+and the short range decays like ``E_1(\rho^2/\sigma^2)``. For ``\log\rho`` both parts are closed forms (the short range
+``-E_1(U)/4\pi``); for ``K_0`` the long range is tabulated once per plan on ``\rho \le \sqrt{40}\,\sigma`` and equals
+``K_0`` beyond. A gradient multiplies the multiplier by ``i\xi``. `BiharmonicGradient2D` is three log sums and moments,
+as on its FMM path.
 
 `FilmEwald` evaluates, on one grid, all the far-field sums of a coupled 2D + 3D Stokes operator on a surface and its
 edge: the area-to-area velocity ``\sum_j [G_2 + G_3](x_i - y_j)f_j``, the edge-to-area velocity

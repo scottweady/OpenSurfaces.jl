@@ -47,16 +47,21 @@ boundary.
 
 - The base is given, not extracted from the symbol, and must match it at both ends of ``k``.
 - A remainder that decays algebraically needs a large ``k_{\max}``: a screened kernel ``e^{-\kappa\rho}/4\pi\rho``
-  needs ``k_{\max} \sim 1/(\text{tol}\,\kappa)``, so it warns at the default tolerance. The Ewald sums refuse such a
-  remainder (their long-range multiplier would sample its cone at ``\rho = 0``).
+  needs ``k_{\max} \sim 1/(\text{tol}\,\kappa)``, so it warns at the default tolerance. As a `remainder` of an Ewald
+  sum it is refused (the long-range multiplier would sample its cone at ``\rho = 0``); a `SymbolKernel` used as the
+  kernel itself is summed by Ewald, its remainder split by weight ([Fast sums](@ref method-fast-sums)).
+- The table of a `SymbolKernel` used as the kernel itself under Ewald must reach the long-range window (the point
+  set's extent plus about ``11\sigma``): build it with a larger ``\rho_c`` or a far field otherwise.
 - `regularize` (a remainder not integrable at ``k = 0``) applies to the scalar `:gradient` output only.
 
 ## Fast sums
 
 - `FilmEwald` skips only the area self pairs: its area nodes must be distinct and no boundary node may sit on an area
   node (true of `build_mesh`, whose area nodes are interior Gauss points); it throws otherwise.
-- An `Evaluator` of `Stokeslet3D` takes one target set, and a remainder with Ewald (the default) or direct sums, not
-  with FMM3D.
+- An `Evaluator` of `Stokeslet3D` (or of a tensor `SymbolKernel` under Ewald) takes one target set, and a remainder
+  with Ewald (the default) or direct sums, not with FMM3D.
+- `MHNormalKernel` with several target sets: the direct sum indexes its normals per set, the fast sums over the
+  sets concatenated; use one target set.
 - The accuracy of an Ewald plan or of a remainder's local sum is fixed when it is built; only the FMMs take `eps` per
   call.
 - `evaluator_matrix` is dense, ``O(N^2)`` memory: at p = 10 the unit disc has 8700 nodes, a 600 MB matrix for a

@@ -57,7 +57,9 @@ E = Evaluator(LaplaceKernel3D(), ad; remainder = K)
   default ``k_{\max} = 25/``scale. One that decays algebraically (a screened kernel ``e^{-\kappa\rho}/4\pi\rho``,
   ``\Delta \sim -\kappa^2/(4k^3)``) has a cone or a logarithm at ``\rho = 0``: the constructor classifies the tail
   (`K.decay === :algebraic`), extends ``k_{\max}`` (up to 64 times) until the tail is below `tol` of ``|R(0)|``,
-  and warns when it cannot. An `Evaluator` then takes the near corrections of the whole kernel, base plus remainder,
-  and the Ewald sums refuse it.
+  and warns when it cannot. An `Evaluator` then takes the near corrections of the whole kernel, base plus remainder.
+  As a `remainder` the Ewald sums refuse it; the `SymbolKernel` used as the kernel itself is summed by Ewald, its
+  remainder split by weight between the long and the short range ([Fast sums](@ref method-fast-sums)). A tensor
+  one is tabulated as ``(\alpha, A_2/\rho)``, since ``\beta = -2A_2/\rho^2`` then grows like ``1/\rho`` at ``\rho = 0``.
 
 `cached_kernel(build, key)` keeps a table built once per key (a depth, a screening length) for the session.
