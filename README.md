@@ -41,7 +41,7 @@ u = single_layer(S, ones(length(ad)))       # within 2e-8 of E(r²)/π at the de
 |:--|:--|
 | Geometry | `Vec2`, `Mat2`, panel rules (`gl_rule`, `gj_rule`), `CurvePanel`, `discretize_curve`, `discretize_curves`, `reverse_curve`, `BoundaryDisc`, `build_mesh`, `film_drops`, `AreaDisc`, `mesh_quality`, `local_feature_size`, `interpolate_nodal` |
 | Kernels | `G2`, `G3`, `P2`, `T2`, `stress2`, `LaplaceKernel2D`, `LaplaceGradient2D`, `BiharmonicGradient2D`, `MHKernel`, `MHNormalKernel`; from Fourier symbols: `SymbolKernel`, `Stokeslet3D`, `LaplaceKernel3D`, `kernel_symbol`, `kernel_remainder`, `cached_kernel`. `G3` and `Stokeslet3D(; μ_3D)` are the in-plane block of the **half-space** Stokeslet (viscosity μ_3D below a free surface), (1/(4πμ_3D))(I/ρ + r rᵀ/ρ³): for an unbounded fluid of viscosity μ_f, pass μ_3D = 2μ_f |
-| Fast sums | `stokes2d_apply`, `stokes3d_plane_apply` (FMM), `EwaldStokes3D`, `FilmEwald` (2D + 3D on one grid), `SmoothConvolution` |
+| Fast sums | `stokes2d_apply`, `stokes3d_plane_apply` (FMM), `EwaldStokes3D`, `EwaldLaplace3D`, `RadialEwald2D`, `FilmEwald` (2D + 3D on one grid), `SmoothConvolution` |
 | Quadrature | `LineQuad` and the boundary single layer and traction (`slp2d_*`, `traction_self_matrix`), `area_correction`, `area_local_weights` |
 | Evaluators | `Evaluator` (any kernel, area or line sources, any targets), `VolumePotentials`, `SingleLayer3D`; as operators: `size`, `mul!` and `*` on interleaved `Float64` vectors (for Krylov solvers), `evaluator_matrix` (dense, every kernel shape), `panel_groups` and `local_blocks` (diagonal blocks, for a block-Jacobi preconditioner) |
 

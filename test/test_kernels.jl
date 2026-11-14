@@ -165,6 +165,65 @@ end
 end
 
 relmax(u, v) = maximum(norm.(u .- v)) / maximum(norm.(v))
+@testset "Laplace Ewald (LaplaceKernel3D) vs the direct sum: coincident and duplicated points skipped" begin
+    lap(src, q, T) = [sum((x == y ? 0.0 : q[j] / (4π * norm(x - y))) for (j, y) in enumerate(src)) for x in T]
+    rel(a, b) = norm(a - b) / norm(b)
+    rng = MersenneTwister(16)
+    src = randpts(rng, 3000; L=2.0); q = randn(rng, 3000) ./ 3000
+    trg = vcat(src[1:400], randpts(rng, 200; L=2.0), src[2000:2100])
+    src2 = vcat(src, src[1:5]); q2 = vcat(q, randn(rng, 5) ./ 3000)
+    for tol in (1e-6, 1e-10)
+        e1 = rel(ewald_apply(EwaldLaplace3D(src; tol), q), lap(src, q, src))
+        e2 = rel(ewald_apply(EwaldLaplace3D(src, trg; tol), q), lap(src, q, trg))
+        e3 = rel(ewald_apply(EwaldLaplace3D(src2; tol), q2), lap(src2, q2, src2))
+        @printf("Laplace Ewald, tol %.0e: self %.1e, targets %.1e, duplicated %.1e\n", tol, e1, e2, e3)
+        @test max(e1, e2, e3) < tol
+    end
+    # the evaluator: Ewald against the direct sum (the same corrections), stored and smooth densities, two target sets
+    p = 10
+    bd, ad, _ = build_mesh(discretize_curve(θ -> Vec2(1.5cos(θ), 0.75sin(θ)), p; tol=1e-6), p)
+    σ = [1 + x[1] - x[2]^2 for x in ad.x]
+    for density in (:stored, :smooth)
+        kw = (; density, targets=(:area, :boundary), bd, tol=1e-8, eps=1e-10)
+        a = Evaluator(LaplaceKernel3D(), ad; fast=:ewald, kw...)(σ)
+        b = Evaluator(LaplaceKernel3D(), ad; fast=:direct, kw...)(σ)
+        e = max(rel(a[1], b[1]), rel(a[2], b[2]))
+        @printf("Laplace Ewald evaluator (%s, area + boundary) against direct: %.1e\n", density, e)
+        @test e < 1e-10
+    end
+    E = Evaluator(LaplaceKernel3D(), ad; fast=:ewald, eps=1e-8)
+    @test_throws ArgumentError E(σ; eps=1e-6)
+    @test_throws ArgumentError Evaluator(LaplaceKernel3D(), ad; plan=EwaldStokes3D(ad.x))
+end
+
+@testset "2D radial Ewald (log ρ, K₀) vs the direct sum, values and gradients" begin
+    G(kind, k, r) = (ρ = norm(r); kind === :log ? log(ρ) / 2π : _mhK01(k * ρ)[1] / 2π)
+    dG(kind, k, r) = (ρ = norm(r); kind === :log ? r / (2π * ρ^2) : -_mhK01(k * ρ)[2] * r / (2π * ρ^2))
+    dsum(f, src, q, T) = [sum((x == y ? zero(f(Vec2(1, 0))) : q[j] * f(x - y)) for (j, y) in enumerate(src)) for x in T]
+    rel(a, b) = (a = reduce(vcat, collect.(a)); b = reduce(vcat, collect.(b)); norm(a - b) / norm(b))
+    rng = MersenneTwister(17)
+    src = randpts(rng, 2000; L=2.0); q = randn(rng, 2000) ./ 2000
+    trg = vcat(src[1:300], randpts(rng, 200; L=2.0))
+    for (kind, k) in ((:log, 0.0), (:mh, 0.3), (:mh, 5.0)), tol in (1e-6, 1e-10)
+        e1 = rel(ewald_apply(RadialEwald2D(kind, src; k, tol), q), dsum(r -> G(kind, k, r), src, q, src))
+        e2 = rel(ewald_apply(RadialEwald2D(kind, src, trg; k, tol), q), dsum(r -> G(kind, k, r), src, q, trg))
+        e3 = rel(ewald_apply(RadialEwald2D(kind, src, trg; k, tol, out=:gradient), q), dsum(r -> dG(kind, k, r), src, q, trg))
+        @printf("2D Ewald %-4s k %.1f tol %.0e: value self %.1e, targets %.1e; gradient %.1e\n", kind, k, tol, e1, e2, e3)
+        @test max(e1, e2) < tol && e3 < 5tol
+    end
+    # the evaluator with fast = :ewald against the direct sum (one target set: MHNormalKernel's normals are per target)
+    p = 10
+    bd, ad, _ = build_mesh(discretize_curve(θ -> Vec2(1.5cos(θ), 0.75sin(θ)), p; tol=1e-6), p)
+    σ = [1 + x[1] - x[2]^2 for x in ad.x]
+    nrm = [normalize(Vec2(x[1] + 0.1, x[2])) for x in ad.x]
+    for K in (LaplaceKernel2D(), LaplaceGradient2D(), BiharmonicGradient2D(; κ=0.3), MHKernel(2.0), MHNormalKernel(2.0, nrm))
+        a = Evaluator(K, ad; fast=:ewald, tol=1e-8, eps=1e-10)(σ); b = Evaluator(K, ad; fast=:direct, tol=1e-8)(σ)
+        e = rel(a, b)
+        @printf("2D Ewald evaluator %-22s against direct: %.1e\n", nameof(typeof(K)), e)
+        @test e < 1e-9
+    end
+end
+
 @testset "Ewald sums vs direct, without and with a remainder, tol 1e-6" begin
     # random points in a 3 × 1.5 box, and a mesh-like set clustered toward an ellipse's edge; the remainder is the
     # exact tensor pair of common/symbol_pairs.jl (at μ = 1, so it enters as R/μ_3D)

@@ -48,7 +48,7 @@ u = single_layer(S, ones(length(ad)))       # within 2e-8 of E(r²)/π at the de
 | Geometry | adaptive boundary panels from a parametrization; area meshes (by Gmsh) with graded edge layers, holes, several components; mesh quality, interpolation |
 | Kernels | Laplace (2D, 3D), 2D Stokeslet, pressure and traction, the in-plane half-space Stokeslet, modified Helmholtz; any callable `K(r)` or `K(i, r)`; `SymbolKernel` from a Fourier symbol |
 | Quadrature | local corrections for area sources (polar rules on the panel, adaptive near it) and line sources (log product rules on ``\Gamma``, adaptive near it), as sparse matrices |
-| Fast sums | FMM2D, FMM3D, Ewald + NUFFT (3D Stokeslet, a whole 2D + 3D film operator on one grid), smooth convolutions |
+| Fast sums | FMM2D, FMM3D, Ewald + NUFFT (3D Stokeslet, 3D Laplace, 2D log and K₀ kernels, a whole 2D + 3D film operator on one grid), smooth convolutions |
 | Evaluators | `Evaluator` (any kernel, area or line sources, any targets) as a function and as a linear operator for Krylov solvers, its dense matrix and diagonal blocks; `SingleLayer3D`, `VolumePotentials` |
 
 ## Where to go next

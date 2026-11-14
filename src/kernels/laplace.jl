@@ -4,7 +4,7 @@
 #   LaplaceGradient2D      ∇ of it, (1/2π) r/ρ²                 vector, first column
 #   BiharmonicGradient2D   (1/8π) r (2 log ρ + c0),  c0 = −1 + 2κ − 2 log R: ∇ of the bilaplacian kernel
 #                          (ρ²/8π)(log(ρ/R) − 1 + κ)           vector, first column
-# Far field: FMM2D's Laplace FMM (`Evaluator`).
+# Far field: FMM2D's Laplace FMM (`Evaluator`), or `RadialEwald2D` (fast = :ewald).
 
 """(1/2π) log ρ, as (1/2π) log ρ · I."""
 struct LaplaceKernel2D end

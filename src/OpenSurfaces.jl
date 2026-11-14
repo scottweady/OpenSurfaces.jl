@@ -43,6 +43,7 @@ include("kernels/fmm.jl")
 include("kernels/symbol.jl")
 include("kernels/ewald2d.jl")
 include("kernels/ewald.jl")
+include("kernels/ewald_radial2d.jl")
 # local (singular / near-singular) quadrature
 include("quadrature/line_quad.jl")
 include("quadrature/area_quad.jl")
@@ -78,7 +79,7 @@ export Vec2, Mat2, Rule1D, gl_rule, gj_rule, lagrange_row, lagrange_row!, interp
 # kernels and fast sums
 export G2, G3, P2, T2, stress2, LaplaceKernel2D, LaplaceGradient2D, BiharmonicGradient2D, MHKernel, MHNormalKernel,
        stokes2d_apply, stokes2d_direct, stokes3d_plane_apply, stokes3d_plane_direct,
-       interleave, deinterleave, SmoothConvolution, smooth_apply, EwaldStokes3D, ewald_apply, FilmEwald,
+       interleave, deinterleave, SmoothConvolution, smooth_apply, EwaldStokes3D, EwaldLaplace3D, RadialEwald2D, ewald_apply, FilmEwald,
        film_ewald_apply, ewald_spread, ewald_velocity, ewald_traction, ewald_velocity3d_boundary
 # kernels from Fourier symbols
 export SymbolKernel, RadialTable, Stokeslet3D, LaplaceKernel3D, kernel_symbol, kernel_remainder, remainder_tensor,

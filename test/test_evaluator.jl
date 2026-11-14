@@ -162,8 +162,9 @@ end
     Rd = SymbolKernel(k -> tanh(0.3k) / (2k); base=LaplaceKernel3D(), scale=0.3, outputs=(:value,),
                       remainder=k -> -1 / (k * (exp(0.6k) + 1)))
     @test_throws ArgumentError Evaluator(LaplaceKernel3D(), ad; density=:smooth, remainder=Rd)(f; eps=1e-9)
-    Lf = Evaluator(LaplaceKernel3D(), ad)
+    Lf = Evaluator(LaplaceKernel3D(), ad; fast=:fmm)
     @test Lf(f; eps=1e-10) ≈ Lf(f) rtol = 1e-5
+    @test_throws ArgumentError Evaluator(LaplaceKernel3D(), ad)(f; eps=1e-10)     # its default is Ewald
 end
 
 @testset "operators: evaluator_matrix by shape, mul!, size, local blocks, line traction K(i, r)" begin

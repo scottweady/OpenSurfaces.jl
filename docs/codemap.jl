@@ -44,7 +44,7 @@ const SETTINGS = [
      run=:(let pans = discretize_curve(disc, 8), (bd, ad, _) = build_mesh(pans, 8)
                Evaluator(Stokeslet3D(), ad)([Vec2(x[2], 1 - x[1]^2) for x in ad.x]) end)),
     (id="laplace3d", label="LaplaceKernel3D", group="Kernel", base=false, parent="", schemes=String[],
-     about="Evaluator(LaplaceKernel3D(), ad), the kernel 1/(4πρ), on a scalar density: summed by FMM3D's Laplace FMM",
+     about="Evaluator(LaplaceKernel3D(), ad), the kernel 1/(4πρ), on a scalar density: summed by Ewald + NUFFT (EwaldLaplace3D)",
      run=:(Evaluator(LaplaceKernel3D(), ad)(g))),
     (id="laplace2d", label="LaplaceKernel2D", group="Kernel", base=false, parent="", schemes=String[],
      about="Evaluator(LaplaceKernel2D(), ad), the kernel (1/2π) log ρ, and LaplaceGradient2D, its gradient: summed by FMM2D's Laplace FMM",
@@ -85,7 +85,7 @@ const SETTINGS = [
     # fast sums
     (id="fmm", label="fast = :fmm", group="Fast sum", base=false, parent="stokes3d",
      schemes=["stokes3d", "laplace3d", "laplace2d", "biharmonic", "mh"],
-     about="fast = :fmm: Stokeslet3D summed by FMM3D's Stokes FMM instead of Ewald (the other built-in kernels are summed by their FMM anyway)",
+     about="fast = :fmm: Stokeslet3D summed by FMM3D's Stokes FMM instead of Ewald (LaplaceKernel3D likewise, by FMM3D's Laplace FMM; the 2D kernels are summed by FMM2D anyway)",
      run=:(Evaluator(Stokeslet3D(), ad; fast=:fmm)(F))),
     (id="direct", label="fast = :direct", group="Fast sum", base=false, parent="stokes3d", schemes=ALL,
      about="fast = :direct: the direct sum over all pairs, threaded over the targets",

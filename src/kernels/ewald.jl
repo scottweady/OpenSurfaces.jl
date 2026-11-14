@@ -173,6 +173,120 @@ function ewald_apply(E::EwaldStokes3D, f::AbstractVector{Vec2})
     u
 end
 
+# ---------------------------------------------------------------------------------------
+# The same split for the 3D Laplace kernel on coplanar points: u(xᵢ) = Σⱼ qⱼ / (4π |xᵢ − yⱼ|), with
+# 1/ρ = φ_L + φ_S as above (the scalar part of the Stokeslet's K[φ]). One scalar NUFFT pair per apply, a scalar
+# multiplier and a sparse short-range matrix. Coincident pairs are skipped (as FMM3D's lfmm3d and the direct sum):
+# i = j in self mode and every explicit target that sits exactly on a source.
+# ---------------------------------------------------------------------------------------
+
+struct EwaldLaplace3D
+    σ::Float64
+    rc::Float64
+    M::NTuple{2,Int}
+    Khat::Matrix{Float64}                  # (M₁, M₂), FFT mode order, scaled by 1/(4π P₁P₂)
+    plan1::FINUFFT.finufft_plan{Float64}   # type 1 at the sources
+    plan2::FINUFFT.finufft_plan{Float64}   # type 2 at the targets
+    nsrc::Int
+    ntrg::Int
+    selfmode::Bool
+    St::SparseMatrixCSC{Float64,Int}       # short range, by target: column i holds target i's weights (no quadrature weights)
+    coinc::Vector{NTuple{2,Int}}           # coincident (target, source) pairs other than i = j in self mode
+    kl0::Float64                           # windowed φ_L(0)/(4π), subtracted at the coincident pairs
+    timings::Dict{Symbol,Float64}
+end
+
+"""
+    EwaldLaplace3D(src, trg=nothing; tol=DEFAULT_TOL, σ=nothing, nneigh=150)
+
+Plan for u(xᵢ) = Σⱼ qⱼ / (4π|xᵢ − yⱼ|) (`LaplaceKernel3D`) with fixed source points `src` in the plane and targets
+`trg` (`nothing`: targets = sources). Coincident pairs are skipped, as by FMM3D and the direct sum: i = j, explicit
+targets that sit exactly on a source, and duplicated source points. σ defaults to the value giving about `nneigh`
+short-range neighbors per target. Apply with `ewald_apply(E, q)` (q includes the quadrature weights).
+"""
+function EwaldLaplace3D(src::AbstractVector{Vec2}, trg=nothing; tol::Real=DEFAULT_TOL, σ=nothing, nneigh::Real=150,
+                        nthreads::Int=Threads.nthreads())
+    tm = Dict{Symbol,Float64}()
+    selfmode = trg === nothing
+    T = selfmode ? src : collect(Vec2, trg)
+    allp = selfmode ? src : vcat(src, T)
+    lo = reduce((a, b) -> min.(a, b), allp); hi = reduce((a, b) -> max.(a, b), allp)
+    c0 = (lo + hi) / 2
+    L = max.(hi - lo, 1e-12)
+    c = max(erfcinv(tol), 3.0)
+    σs = σ === nothing ? _calibrate_sigma(src, T, c, nneigh, sqrt(nneigh / (π * length(src) / (L[1] * L[2]))) / c) :
+                         Float64(σ)
+    rc = c * σs
+    S = L .+ 2rc
+    P = Tuple(2 .* S)
+    h = π * σs / (2c)
+    M = ntuple(d -> 2 * ceil(Int, P[d] / (2h)), 2)
+    tm[:multiplier] = @elapsed begin
+        K = _windowed_fft(r -> (_phiL(norm(r), σs)[1],), 1, M, P, L, rc, σs)
+        Khat = real.(view(K, :, :, 1)) ./ 4π
+    end
+    tm[:plans] = @elapsed begin
+        sx = [2π * (p[1] - c0[1]) / P[1] for p in src]; sy = [2π * (p[2] - c0[2]) / P[2] for p in src]
+        tx = [2π * (p[1] - c0[1]) / P[1] for p in T]; ty = [2π * (p[2] - c0[2]) / P[2] for p in T]
+        ntol = max(tol / 10, 100eps())     # FINUFFT's double-precision floor
+        plan1 = FINUFFT.finufft_makeplan(1, [M[1], M[2]], -1, 1, ntol; modeord=1, nthreads=nthreads)
+        FINUFFT.finufft_setpts!(plan1, sx, sy)
+        plan2 = FINUFFT.finufft_makeplan(2, [M[1], M[2]], +1, 1, ntol; modeord=1, nthreads=nthreads)
+        FINUFFT.finufft_setpts!(plan2, tx, ty)
+    end
+    tm[:shortrange] = @elapsed St = _sr_scalar(src, T, selfmode, rc, ρ -> erfc(ρ / σs) / (4π * ρ))
+    kl0 = (2 / (σs * sqrt(π))) * (erfc((-L[1] - rc) / σs) / 2) * (erfc((-L[2] - rc) / σs) / 2) / 4π
+    EwaldLaplace3D(σs, rc, M, Khat, plan1, plan2, length(src), length(T), selfmode, St,
+                   _coincident_pairs(src, T, selfmode), kl0, tm)
+end
+
+"""Scalar short-range matrix by target (column i: the sources within rc of target i, coincident ones skipped)."""
+function _sr_scalar(src, T, selfmode, rc, kfun)
+    cells, cell = _cell_list(src, rc)
+    nt = length(T); rc2 = rc^2
+    cnt = zeros(Int, nt)
+    _chunked_foreach(nt) do b, i
+        _neighbors!(b, T[i], src, cells, cell, rc2, selfmode ? i : 0)
+        cnt[i] = length(b)
+    end
+    colptr = Vector{Int}(undef, nt + 1); colptr[1] = 1
+    for i in 1:nt
+        colptr[i+1] = colptr[i] + cnt[i]
+    end
+    rowval = Vector{Int}(undef, colptr[end] - 1); nzval = Vector{Float64}(undef, colptr[end] - 1)
+    _chunked_foreach(nt) do b, i
+        _neighbors!(b, T[i], src, cells, cell, rc2, selfmode ? i : 0)
+        p = colptr[i] - 1; x = T[i]
+        @inbounds for (m, j) in enumerate(b)
+            rowval[p+m] = j; nzval[p+m] = kfun(norm(x - src[j]))
+        end
+    end
+    SparseMatrixCSC(length(src), nt, colptr, rowval, nzval)
+end
+
+"""u = Σⱼ qⱼ/(4π|xᵢ − yⱼ|) for the planned sources/targets (q already includes quadrature weights)."""
+function ewald_apply(E::EwaldLaplace3D, q::AbstractVector{<:Real})
+    length(q) == E.nsrc || throw(DimensionMismatch("ewald_apply: $(length(q)) strengths for $(E.nsrc) sources"))
+    F = Matrix{ComplexF64}(undef, E.M[1], E.M[2])
+    FINUFFT.finufft_exec!(E.plan1, complex.(Vector{Float64}(q)), F)
+    F .*= E.Khat
+    U = Vector{ComplexF64}(undef, E.ntrg)
+    FINUFFT.finufft_exec!(E.plan2, F, U)
+    St = E.St; cp = St.colptr; rv = St.rowval; nv = St.nzval
+    u = Vector{Float64}(undef, E.ntrg)
+    Threads.@threads for i in 1:E.ntrg
+        s = real(U[i])
+        @inbounds for p in cp[i]:cp[i+1]-1
+            s += nv[p] * q[rv[p]]
+        end
+        @inbounds u[i] = E.selfmode ? s - E.kl0 * q[i] : s
+    end
+    @inbounds for (i, j) in E.coinc
+        u[i] -= E.kl0 * q[j]
+    end
+    u
+end
+
 """An algebraically decaying remainder has a cone or a log at ρ = 0, which a long-range multiplier would sample."""
 _smooth_remainder(R, who) = R === nothing || R.decay !== :algebraic ||
     throw(ArgumentError("$who: the remainder decays algebraically in k (a cone or a log at ρ = 0), which the long-range " *

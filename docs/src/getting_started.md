@@ -76,7 +76,7 @@ summed fast, plus sparse local corrections where the kernel is singular. Build i
 using SpecialFunctions: ellipe
 r = [hypot(x...) for x in ad.x]
 
-E = Evaluator(LaplaceKernel3D(), ad; density = :smooth)     # 1/(4πρ), far field by FMM3D
+E = Evaluator(LaplaceKernel3D(), ad; density = :smooth)     # 1/(4πρ), far field by Ewald + NUFFT
 u = E(ones(length(ad)))                                     # S[1] = E(r²)/π at the area nodes, to 1.2e-8
 
 Eb = Evaluator(LaplaceKernel3D(), ad; density = :smooth, targets = :boundary, bd)   # at the nodes of Γ
@@ -95,9 +95,9 @@ U = Evaluator(Stokeslet3D(), ad)(F)                        # (3/16, 0) at every 
 | Kernel | | Fast sum |
 |:--|:--|:--|
 | `Stokeslet3D(; μ_3D)` | in-plane block of the half-space Stokeslet, ``(I/\rho + rr^T/\rho^3)/(4\pi\mu_{3D})``; for an unbounded fluid of viscosity ``\mu_f`` pass ``\mu_{3D} = 2\mu_f`` | Ewald + NUFFT, or FMM3D |
-| `LaplaceKernel3D()` | ``1/(4\pi\rho)`` | FMM3D |
-| `LaplaceKernel2D()`, `LaplaceGradient2D()`, `BiharmonicGradient2D(; κ, R)` | ``\log\rho/2\pi``, its gradient, the gradient of the biharmonic kernel | FMM2D |
-| `MHKernel(k)`, `MHNormalKernel(k, normals)` | ``K_0(k\rho)/2\pi`` and its normal derivative at the targets | FMM2D (Helmholtz at ``ik``) |
+| `LaplaceKernel3D()` | ``1/(4\pi\rho)`` | Ewald + NUFFT, or FMM3D |
+| `LaplaceKernel2D()`, `LaplaceGradient2D()`, `BiharmonicGradient2D(; κ, R)` | ``\log\rho/2\pi``, its gradient, the gradient of the biharmonic kernel | FMM2D, or Ewald + NUFFT |
+| `MHKernel(k)`, `MHNormalKernel(k, normals)` | ``K_0(k\rho)/2\pi`` and its normal derivative at the targets | FMM2D (Helmholtz at ``ik``), or Ewald + NUFFT |
 | `OpenSurfaces.StokesKernel(μ_2D, μ_3D)` | the 2D Stokeslet `G2` plus `G3` | direct |
 | any callable `K(r)` or `K(i, r)` | your kernel | direct |
 | `SymbolKernel` | a kernel from its Fourier symbol (below) | as `remainder` of its base: the base's; as the kernel itself: direct |

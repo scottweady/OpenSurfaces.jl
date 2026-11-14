@@ -3,7 +3,7 @@
 #   E(f) = far(f) + C f,
 # the smooth rule summed by a fast method chosen by the kernel's type, plus sparse local corrections
 # (`area_correction`, `line_correction`). It holds the four pieces every potential assembled by hand:
-#   1. the fast sum: Ewald (or FMM3D) for `Stokeslet3D`, FMM3D for `LaplaceKernel3D`, FMM2D for the 2D Laplace and
+#   1. the fast sum: Ewald (or FMM3D) for `Stokeslet3D` and `LaplaceKernel3D`, FMM2D (or Ewald) for the 2D Laplace and
 #      biharmonic kernels and (at wavenumber ik) for the modified Helmholtz ones, direct sums for any other callable;
 #   2. the local corrections, built once;
 #   3. the bookkeeping: target sets (:area, :boundary, or points; several at once share one fast sum), the unweighted
@@ -104,6 +104,13 @@ struct _FMM3DStokesFar
     self::Bool
 end
 struct _FMM3DLaplaceFar end
+struct _EwaldLaplaceFar
+    plan::EwaldLaplace3D                 # targets: all the sets, concatenated
+end
+struct _RadialEwaldFar
+    plan::RadialEwald2D                  # targets: all the sets, concatenated
+    kind::Symbol                         # :value, :gradient, :normal, :bgrad
+end
 struct _RFMM2DFar
     kind::Symbol                         # :value, :gradient, :bgrad
 end
@@ -127,11 +134,13 @@ for the density `f` at the source nodes (scalars or `Vec2`, by `kernel_shape(K)`
 matrix of a direct-sum evaluator.
 - `density`: `:stored` takes the mesh's own values (edge-weighted on its weighted panels); `:smooth` physical nodal
   values of a smooth density, integrated on the unweighted copy of the mesh.
-- `fast`: `:auto` (by the kernel's type), `:ewald` or `:fmm` (`Stokeslet3D`), `:direct`.
+- `fast`: `:auto` (by the kernel's type: Ewald for `Stokeslet3D` and `LaplaceKernel3D`, FMM2D for the 2D kernels),
+  `:ewald`, `:fmm`, `:direct`.
 - `remainder`: a `SymbolKernel` added to `K` (head of src/evaluators/evaluator.jl); for `Stokeslet3D` at
   μ = 1 (scaled with `K`), into Ewald's multiplier; for `LaplaceKernel3D` and `BiharmonicGradient2D` without a far
   field, a local sum over the pairs closer than ρc (where the kernel's tail falls below `eps`).
-- `plan`: an existing `EwaldStokes3D` plan of the same sources and targets to reuse.
+- `plan`: an existing `EwaldStokes3D` (`EwaldLaplace3D`: targets = all the sets, concatenated) plan of the same
+  sources and targets to reuse.
 - `near_factor`, `opts`, `upsampling`: passed to `area_correction`. With an `AreaUpsampling` of `ad` (stored
   densities, no remainder) the fast sum runs over its points, the density interpolated to them (`upsample`).
 - `tol`: the local corrections; `eps`: the fast sum (fixed here for Ewald and the local sum of a remainder; per call
@@ -237,13 +246,31 @@ function _area_far(K::Union{LaplaceKernel3D,BiharmonicGradient2D}, R, fast, plan
                          R.decay === :algebraic)
     end
     fast === :direct && return _DirectFar()
-    K isa LaplaceKernel3D ? _FMM3DLaplaceFar() : _RFMM2DFar(:bgrad)
+    K isa BiharmonicGradient2D && return fast === :ewald ? _radial_far(:log, :bgrad, src, trg, 0.0, eps) : _RFMM2DFar(:bgrad)
+    fast in (:auto, :ewald, :fmm) || throw(ArgumentError("Evaluator: fast = :auto, :ewald, :fmm or :direct for LaplaceKernel3D"))
+    fast === :fmm && plan === nothing && return _FMM3DLaplaceFar()
+    plan === nothing || plan isa EwaldLaplace3D ||
+        throw(ArgumentError("Evaluator: the plan of a LaplaceKernel3D is an EwaldLaplace3D"))
+    plan !== nothing && return _EwaldLaplaceFar(plan)
+    X = reduce(vcat, trg)
+    _EwaldLaplaceFar(length(trg) == 1 && X == src ? EwaldLaplace3D(src; tol=eps) : EwaldLaplace3D(src, X; tol=eps))
 end
 function _area_far(K::Union{LaplaceKernel2D,LaplaceGradient2D,MHKernel,MHNormalKernel}, R, fast, plan, src, trg, self, C, eps)
     R === nothing || throw(ArgumentError("Evaluator: no remainder for $(typeof(K))"))
     fast === :direct && return _DirectFar()
+    fast in (:auto, :ewald, :fmm) || throw(ArgumentError("Evaluator: fast = :auto, :ewald, :fmm or :direct for $(typeof(K))"))
+    if fast === :ewald                   # :auto: FMM2D, faster than Ewald at the same accuracy (studies/laplace_ewald)
+        return K isa LaplaceKernel2D ? _radial_far(:log, :value, src, trg, 0.0, eps) :
+               K isa LaplaceGradient2D ? _radial_far(:log, :gradient, src, trg, 0.0, eps) :
+               K isa MHKernel ? _radial_far(:mh, :value, src, trg, K.k, eps) : _radial_far(:mh, :normal, src, trg, K.k, eps)
+    end
     K isa LaplaceKernel2D ? _RFMM2DFar(:value) : K isa LaplaceGradient2D ? _RFMM2DFar(:gradient) :
         K isa MHKernel ? _HFMM2DFar(:value) : _HFMM2DFar(:normal)
+end
+function _radial_far(kind, out, src, trg, k, eps)
+    X = reduce(vcat, trg)
+    kw = (; k, out=out in (:gradient, :normal) ? :gradient : :value, nd=out === :bgrad ? 3 : 1, tol=eps)
+    _RadialEwaldFar(length(trg) == 1 && X == src ? RadialEwald2D(kind, src; kw...) : RadialEwald2D(kind, src, X; kw...), out)
 end
 function _area_far(K, R, fast, plan, src, trg, self, C, eps)
     R === nothing || throw(ArgumentError("Evaluator: no remainder for $(typeof(K))"))
@@ -258,9 +285,9 @@ sets the fast sum's accuracy per call for the FMM paths only; the Ewald plan and
 theirs at construction, so there a different `eps` is an `ArgumentError` (build another evaluator instead).
 """
 function (E::Evaluator)(f::AbstractVector; eps::Real=E.eps)
-    eps == E.eps || !(E.far isa Union{_EwaldFar,_LocalFar}) ||
+    eps == E.eps || !(E.far isa Union{_EwaldFar,_EwaldLaplaceFar,_RadialEwaldFar,_LocalFar}) ||
         throw(ArgumentError("Evaluator: eps = $eps differs from the $(E.eps) this evaluator's " *
-                            "$(E.far isa _EwaldFar ? "Ewald plan" : "local sum") was built for; it cannot change per call"))
+                            "$(E.far isa _LocalFar ? "local sum" : "Ewald plan") was built for; it cannot change per call"))
     f̃ = E.smooth === nothing ? f : _to_unweighted(E.smooth[1], E.smooth[2], f)
     U = _far_apply(E.far, E, (E.up === nothing ? f̃ : upsample(E.up[1], E.up[2], f̃)) .* E.w, Float64(eps))
     nout, nin = E.shape
@@ -275,6 +302,21 @@ _split(v::AbstractVector, trg) = (o = cumsum([0; length.(trg)]); [v[o[s]+1:o[s+1
 _split(m::AbstractMatrix, trg) = (o = cumsum([0; length.(trg)]); [m[:, o[s]+1:o[s+1]] for s in eachindex(trg)])
 
 _far_apply(F::_EwaldFar, E, q, eps) = [ewald_apply(F.plan, q)]
+_far_apply(F::_EwaldLaplaceFar, E, q, eps) = _split(ewald_apply(F.plan, q), E.trg)
+function _far_apply(F::_RadialEwaldFar, E, q, eps)
+    F.kind in (:value, :gradient) && return _split(ewald_apply(F.plan, q), E.trg)
+    X = reduce(vcat, E.trg)
+    if F.kind === :normal
+        g = ewald_apply(F.plan, q); n = E.kernel.n
+        return _split([dot(g[i], n[i]) for i in eachindex(X)], E.trg)
+    end
+    # :bgrad, as the FMM path: (x − y)(2 log ρ + c0) = 2(x P₀ − P_y) + c0 (x Q − Q_y), P = Σ q {1, y} log ρ
+    y1 = first.(E.src); y2 = last.(E.src)
+    p = 2π .* ewald_apply(F.plan, [q q .* y1 q .* y2])
+    c0 = E.kernel.c0
+    Q = sum(q); Qy = Vec2(sum(q .* y1), sum(q .* y2))
+    _split([(2 * (X[i] * p[i, 1] - Vec2(p[i, 2], p[i, 3])) + c0 * (X[i] * Q - Qy)) / 8π for i in eachindex(X)], E.trg)
+end
 _far_apply(F::_FMM3DStokesFar, E, q, eps) =
     [F.self ? stokes3d_plane_apply(E.src, q; μ_3D=E.kernel.μ, eps=eps).u :
               stokes3d_plane_apply(E.src, q, E.trg[1]; μ_3D=E.kernel.μ, eps=eps).u]

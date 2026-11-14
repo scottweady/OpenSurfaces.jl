@@ -122,6 +122,8 @@ stokes3d_plane_direct
 interleave
 deinterleave
 EwaldStokes3D
+EwaldLaplace3D
+RadialEwald2D
 ewald_apply
 FilmEwald
 film_ewald_apply
