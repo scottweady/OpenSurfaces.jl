@@ -148,10 +148,12 @@ end
 # Workspace
 # ---------------------------------------------------------------------------------------
 
-mutable struct _AQWork
+# V: the accumulated kernel values, SVector{4,Float64} for the 2×2 form (column-major entries) or SVector{M,Float64}
+# for M scalar components (`area_correction(...; ncomp = M)`)
+mutable struct _AQWork{V}
     p::Int
-    W::Matrix{SVector{4,Float64}}    # p × p (i_s, j_t): column-major entries of the 2×2 block
-    acc::Vector{SVector{4,Float64}}  # p
+    W::Matrix{V}                 # p × p (i_s, j_t): the kernel's entries
+    acc::Vector{V}               # p
     ls::Vector{Float64}
     lt::Vector{Float64}
     vx::Vector{Float64}          # current 1D (v) rule
@@ -163,22 +165,38 @@ mutable struct _AQWork
     sings::Vector{ComplexF64}
     bstk::Vector{NTuple{5,Float64}}
     LS::Matrix{Float64}          # box s-Lagrange values, stored q × p (column i = ℓ_i at the q s-nodes)
-    kb::Vector{SVector{4,Float64}}   # qmax: weighted kernel values along one box row
-    tb::Vector{SVector{4,Float64}}   # p × qmax: s-contracted rows of a box (i fastest)
-    LT::Vector{Float64}              # box t-Lagrange values, stored q × p
-    lk::Vector{SVector{4,Float64}}   # polar lines: weighted kernel values (grown as needed)
-    lL::Vector{Float64}              # polar lines: Lagrange values, stored n × p (grown as needed)
+    kb::Vector{V}                # qmax: weighted kernel values along one box row
+    tb::Vector{V}                # p × qmax: s-contracted rows of a box (i fastest)
+    LT::Vector{Float64}          # box t-Lagrange values, stored q × p
+    lk::Vector{V}                # polar lines: weighted kernel values (grown as needed)
+    lL::Vector{Float64}          # polar lines: Lagrange values, stored n × p (grown as needed)
     bB::Vector{NTuple{4,Vec2}}   # box s-node geometry (B, B', T, T')
     bsw::Vector{Float64}
     npts::Int                    # statistics: number of kernel evaluations
 end
 
-function _AQWork(p::Int, qmax::Int)
-    _AQWork(p, zeros(SVector{4,Float64}, p, p), zeros(SVector{4,Float64}, p), zeros(p), zeros(p), Float64[], Float64[],
-            Float64[], Float64[], Float64[], NTuple{2,Float64}[], ComplexF64[], NTuple{5,Float64}[],
-            zeros(p, qmax), zeros(SVector{4,Float64}, qmax), zeros(SVector{4,Float64}, p * qmax), zeros(qmax * p),
-            SVector{4,Float64}[], Float64[], Vector{NTuple{4,Vec2}}(undef, qmax), zeros(qmax), 0)
+_AQWork(p::Int, qmax::Int) = _AQWork{SVector{4,Float64}}(p, qmax)
+function _AQWork{V}(p::Int, qmax::Int) where {V}
+    _AQWork{V}(p, zeros(V, p, p), zeros(V, p), zeros(p), zeros(p), Float64[], Float64[],
+               Float64[], Float64[], Float64[], NTuple{2,Float64}[], ComplexF64[], NTuple{5,Float64}[],
+               zeros(p, qmax), zeros(V, qmax), zeros(V, p * qmax), zeros(qmax * p),
+               V[], Float64[], Vector{NTuple{4,Vec2}}(undef, qmax), zeros(qmax), 0)
 end
+
+# A kernel value times the weight c, as the accumulated type V: the 2×2 form's column-major entries (the kernel
+# returns anything an SMatrix{2,2} takes), or M components (the kernel wrapped by `_Components`, an SVector{M}).
+@inline function _kv(::Type{SVector{4,Float64}}, K, c::Float64)
+    Kw = SMatrix{2,2,Float64,4}(K) * c
+    SVector{4,Float64}(Kw[1], Kw[2], Kw[3], Kw[4])
+end
+@inline _kv(::Type{SVector{M,Float64}}, K::SVector{M,Float64}, c::Float64) where {M} = K * c
+@inline _kv(::Type{SVector{4,Float64}}, K::SVector{4,Float64}, c::Float64) = K * c
+
+"""A kernel of M scalar components (scalar, tuple or vector of length M) as K(i, r)::SVector{M,Float64}."""
+struct _Components{M,F}
+    k::F
+end
+@inline (C::_Components{M})(i::Int, r::Vec2) where {M} = SVector{M,Float64}(C.k(i, r))
 
 """
 Lagrange basis values of rule `r` at x (first barycentric form, no divisions):
@@ -229,12 +247,11 @@ acc[i] = Σ_{m ≤ n} kb[m] L[m,i] (i = 1..p; L stored n × p, column-major in a
 Accumulators stay in registers, two coefficients and two partial sums at a time (independent
 FMA chains); much faster than a load/store of acc per quadrature point.
 """
-@inline function _contract!(acc::Vector{SVector{4,Float64}}, kb::Vector{SVector{4,Float64}},
-                            L::Vector{Float64}, n::Int, p::Int)
+@inline function _contract!(acc::Vector{V}, kb::Vector{V}, L::Vector{Float64}, n::Int, p::Int) where {V}
     i = 1
     @inbounds while i < p
         oi = (i - 1) * n; oj = oi + n
-        c1 = zero(SVector{4,Float64}); c2 = c1; d1 = c1; d2 = c1
+        c1 = zero(V); c2 = c1; d1 = c1; d2 = c1
         m = 1
         while m < n
             k1 = kb[m]; k2 = kb[m+1]
@@ -249,7 +266,7 @@ FMA chains); much faster than a load/store of acc per quadrature point.
         i += 2
     end
     @inbounds if i == p
-        c1 = zero(SVector{4,Float64}); oi = (i - 1) * n
+        c1 = zero(V); oi = (i - 1) * n
         for m in 1:n
             c1 = muladd(kb[m], L[oi+m], c1)
         end
@@ -348,8 +365,8 @@ end
 Line with s = sfix (Δs = sfix − s0), points t = wk.lx[1:n] with Δt = wk.ld (t − t0),
 weights wk.lw (no panel Jacobian). r = x0 − y is computed from differences (no cancellation).
 """
-function _sline!(wk::_AQWork, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int, ap::_Apex,
-                 sfix::Float64, Δs::Float64, n::Int) where {F}
+function _sline!(wk::_AQWork{V}, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int, ap::_Apex,
+                 sfix::Float64, Δs::Float64, n::Int) where {F,V}
     p = wk.p; acc = wk.acc
     b, db, DB, u, du, DT = _geom_dd(P, ap.s0, Δs)
     xt = 0.5 * (u - b)
@@ -360,8 +377,7 @@ function _sline!(wk::_AQWork, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int
         r = -(0.5 * (1 - t) * Δs * DB + 0.5 * (1 + t) * Δs * DT + Δt * xt0)
         xs = 0.5 * (1 - t) * db + 0.5 * (1 + t) * du
         J = xs[1] * xt[2] - xs[2] * xt[1]
-        Kw = SMatrix{2,2,Float64,4}(kern(it, r)) * (wk.lw[m] * J)
-        lk[m] = SVector{4,Float64}(Kw[1], Kw[2], Kw[3], Kw[4])
+        lk[m] = _kv(V, kern(it, r), wk.lw[m] * J)
         _lag!(wk.lt, rt, t)
         for i in 1:p
             lL[(i-1)*n+m] = wk.lt[i]
@@ -383,8 +399,8 @@ end
 """
 Line with t = tfix (Δt = tfix − t0), points s = wk.lx[1:n] with Δs = wk.ld, weights wk.lw.
 """
-function _tline!(wk::_AQWork, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int, ap::_Apex,
-                 tfix::Float64, Δt::Float64, n::Int) where {F}
+function _tline!(wk::_AQWork{V}, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int, ap::_Apex,
+                 tfix::Float64, Δt::Float64, n::Int) where {F,V}
     p = wk.p; acc = wk.acc
     a1 = 0.5 * (1 - tfix); a2 = 0.5 * (1 + tfix)
     rt0 = Δt * 0.5 * (ap.T0 - ap.B0)
@@ -396,8 +412,7 @@ function _tline!(wk::_AQWork, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int
         xs = a1 * db + a2 * du
         xt = 0.5 * (u - b)
         J = xs[1] * xt[2] - xs[2] * xt[1]
-        Kw = SMatrix{2,2,Float64,4}(kern(it, r)) * (wk.lw[m] * J)
-        lk[m] = SVector{4,Float64}(Kw[1], Kw[2], Kw[3], Kw[4])
+        lk[m] = _kv(V, kern(it, r), wk.lw[m] * J)
         _lag!(wk.ls, rs, s)
         for i in 1:p
             lL[(i-1)*n+m] = wk.ls[i]
@@ -642,8 +657,8 @@ end
 # Adaptive tensor boxes for targets off the panel
 # ---------------------------------------------------------------------------------------
 
-function _box_tensor!(wk::_AQWork, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int, x0::Vec2,
-                      s1, s2, t1, t2, q::Int, opts::AreaQuadOpts) where {F}
+function _box_tensor!(wk::_AQWork{V}, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int, x0::Vec2,
+                      s1, s2, t1, t2, q::Int, opts::AreaQuadOpts) where {F,V}
     p = wk.p
     r = opts.gl[q]
     hs = (s2 - s1) / 2; cs = (s2 + s1) / 2
@@ -677,15 +692,14 @@ function _box_tensor!(wk::_AQWork, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it
             xs = a1 * db + a2 * du
             xt = 0.5 * (uu - bb)
             J = xs[1] * xt[2] - xs[2] * xt[1]
-            Kw = SMatrix{2,2,Float64,4}(kern(it, x0 - x)) * (wk.bsw[a] * wt * J)
-            kb[a] = SVector{4,Float64}(Kw[1], Kw[2], Kw[3], Kw[4])
+            kb[a] = _kv(V, kern(it, x0 - x), wk.bsw[a] * wt * J)
         end
         # contract over s: accumulators in registers, two coefficients and two partial sums
         # at a time (independent FMA chains)
         i = 1
         while i < p
             oi = (i - 1) * q; oj = oi + q
-            c1 = zero(SVector{4,Float64}); c2 = c1; d1 = c1; d2 = c1
+            c1 = zero(V); c2 = c1; d1 = c1; d2 = c1
             a = 1
             while a < q
                 k1 = kb[a]; k2 = kb[a+1]
@@ -701,7 +715,7 @@ function _box_tensor!(wk::_AQWork, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it
             i += 2
         end
         if i == p
-            c1 = zero(SVector{4,Float64}); oi = (i - 1) * q
+            c1 = zero(V); oi = (i - 1) * q
             for a in 1:q
                 c1 = muladd(kb[a], LS[oi+a], c1)
             end
@@ -716,7 +730,7 @@ function _box_tensor!(wk::_AQWork, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it
     @inbounds for j in 1:p
         oj = (j - 1) * q; ow = (j - 1) * p
         for i in 1:p
-            c1 = zero(SVector{4,Float64}); d1 = c1
+            c1 = zero(V); d1 = c1
             b = 1
             while b < q
                 c1 = muladd(tb[(b-1)*p+i], LT[oj+b], c1)
@@ -828,9 +842,9 @@ _wrap_kernel(K) = hasmethod(K, Tuple{Int,Vec2}) ? K : ((i, r) -> K(r))
 Compute into wk.W the local weights of panel k for target x0. `on` = (s0,t0) if the target
 lies on the panel (closed square), otherwise `nothing` (adaptive boxes).
 """
-function _local_weights!(wk::_AQWork, ad::AreaDisc, k::Int, kern::F, it::Int, x0::Vec2, on,
-                         opts::AreaQuadOpts, P::Panel=ad.panels[k]) where {F}
-    fill!(wk.W, zero(SVector{4,Float64}))
+function _local_weights!(wk::_AQWork{V}, ad::AreaDisc, k::Int, kern::F, it::Int, x0::Vec2, on,
+                         opts::AreaQuadOpts, P::Panel=ad.panels[k]) where {F,V}
+    fill!(wk.W, zero(V))
     rt = trule(ad, k)
     if on === nothing
         _boxes!(wk, P, ad.rs, rt, kern, it, x0, opts)
@@ -1010,7 +1024,8 @@ end
 """
     area_correction(ad, K; targets=nothing, target_info=nothing, tol=DEFAULT_TOL,
                     near_factor=nothing, opts=nothing, detect_on_panel=true,
-                    transposed=false, stats=nothing) -> SparseMatrixCSC
+                    transposed=false, stats=nothing, upsampling=nothing, keep=nothing,
+                    ncomp=nothing) -> SparseMatrixCSC  (or a Vector of them, with `ncomp`)
 
 Sparse correction C (2Nt × 2N, interleaved) such that, for the area potential
 u(xᵢ) = ∫_Ω K(xᵢ − y) μ(y) dA_y,
@@ -1026,7 +1041,14 @@ u(xᵢ) = ∫_Ω K(xᵢ − y) μ(y) dA_y,
   (shared sides/corners) are detected automatically by a Newton solve.
 * `K`: K(r)::SMatrix{2,2} or the target-dependent K(i, r) (i = target index), e.g. a
   traction kernel with the normal of target i.
-* `transposed=true` returns Cᵀ (2N × 2Nt), which is what is assembled internally (saves a copy).
+* `ncomp = M`: K returns M scalar components instead (an `SVector{M}`, a tuple of length M, or a
+  number for M = 1), and the result is a vector of M scalar corrections Cᶜ (Nt × N, one row per
+  target, one column per source node), all from one pass: the rules depend on the geometry only.
+  They share one sparsity pattern (the same `colptr` and `rowval` arrays). Each equals the
+  correction of the scalar kernel Kᶜ alone (bit for bit, up to the fused multiply–adds the compiler
+  may choose for a different M).
+* `transposed=true` returns Cᵀ (2N × 2Nt; with `ncomp`, N × Nt each), which is what is
+  assembled internally (saves a copy).
 * `stats`: optional Dict to receive statistics (pairs, kernel evaluations, nnz).
 * `upsampling::AreaUpsampling`: the far field is evaluated from the upsampled rule instead of
   the nodes; the corrections subtract the upsampled smooth weights and the near radius shrinks.
@@ -1035,7 +1057,8 @@ u(xᵢ) = ∫_Ω K(xᵢ − y) μ(y) dA_y,
 """
 function area_correction(ad::AreaDisc, K; targets=nothing, target_info=nothing, tol::Real=DEFAULT_TOL,
                          near_factor=nothing, opts=nothing, detect_on_panel::Bool=true,
-                         transposed::Bool=false, stats=nothing, upsampling=nothing, keep=nothing)
+                         transposed::Bool=false, stats=nothing, upsampling=nothing, keep=nothing,
+                         ncomp::Union{Nothing,Integer}=nothing)
     if near_factor === nothing && upsampling !== nothing
         # smooth q-point rule: needed distance from the Bernstein-ellipse estimate with q
         ρ = (1 / tol)^(1 / (2upsampling.q))
@@ -1044,12 +1067,21 @@ function area_correction(ad::AreaDisc, K; targets=nothing, target_info=nothing, 
     # (a new binding: reassigning the keyword would box it in the threaded closures below)
     qo = opts === nothing ? AreaQuadOpts(ad.p; tol=tol, near_factor=near_factor) : opts
     kern = _wrap_kernel(K)
-    p = ad.p; p2 = p * p
-    np = npanels(ad); N = length(ad)
     selfmode = targets === nothing
     X = selfmode ? ad.x : collect(Vec2, targets)
-    Nt = length(X)
-    # panel geometry: center, circumradius, diameter
+    geo = _near_setup(ad, X, qo, selfmode, target_info, keep)
+    if ncomp === nothing
+        return _correction_pass(Val(0), ad, kern, X, geo, qo, selfmode, target_info, detect_on_panel, upsampling,
+                                transposed, stats)
+    end
+    ncomp >= 1 || throw(ArgumentError("area_correction: ncomp ≥ 1"))
+    _correction_pass(Val(Int(ncomp)), ad, _Components{Int(ncomp),typeof(kern)}(kern), X, geo, qo, selfmode,
+                     target_info, detect_on_panel, upsampling, transposed, stats)
+end
+
+# panel geometry (center, circumradius, diameter, trimmed copies) and the near panels of every target
+function _near_setup(ad::AreaDisc, X::Vector{Vec2}, qo::AreaQuadOpts, selfmode::Bool, target_info, keep)
+    p2 = ad.p^2; np = npanels(ad); Nt = length(X)
     cen = Vector{Vec2}(undef, np); crad = zeros(np); diam = zeros(np)
     for (k, P) in enumerate(ad.panels)
         c = panel_center(P); cen[k] = c
@@ -1065,7 +1097,6 @@ function area_correction(ad::AreaDisc, K; targets=nothing, target_info=nothing, 
     nrad = qo.near_factor .* crad
     tpan = [_trim_panel(P) for P in ad.panels]
     grid = _PanelGrid(cen, nrad)
-    # pass 1: near lists
     near = Vector{Vector{Int32}}(undef, Nt)
     Threads.@threads for i in 1:Nt
         out = Int32[]
@@ -1080,89 +1111,131 @@ function area_correction(ad::AreaDisc, K; targets=nothing, target_info=nothing, 
         keep === nothing || filter!(k -> keep(i, Int(k)), out)
         near[i] = out
     end
-    colptr = Vector{Int}(undef, 2Nt + 1)
+    (; cen, crad, diam, tpan, near)
+end
+
+# Local weights of the pair (target i, panel k) minus the smooth rule's (the nodes, or the upsampled points), in wk.W
+function _pair_weights!(wk::_AQWork{V}, ad::AreaDisc, kern::F, i::Int, x0::Vec2, k::Int, geo, qo, selfmode::Bool,
+                        target_info, detect_on_panel::Bool, upsampling) where {V,F}
+    p = ad.p; p2 = p * p
+    P = ad.panels[k]
+    on = nothing
+    jself = 0
+    if selfmode
+        if (i - 1) ÷ p2 + 1 == k
+            on = (ad.st[i][1], ad.st[i][2]); jself = i
+        end
+    else
+        if target_info !== nothing && target_info[i][1] == k
+            on = (target_info[i][2][1], target_info[i][2][2])
+        elseif detect_on_panel && norm(x0 - geo.cen[k]) <= 1.05geo.crad[k]
+            fl, s0, t0 = _on_panel(P, x0, geo.diam[k])
+            fl && (on = (s0, t0))
+        end
+    end
+    W = _local_weights!(wk, ad, k, kern, i, x0, on, qo, geo.tpan[k])
+    base = (k - 1) * p2
+    if upsampling !== nothing
+        # subtract the upsampled smooth rule: Σ_u K(x0 − y_u) ω_u ℓ_l(y_u)
+        q2 = upsampling.q^2
+        I_ = P.weighted ? upsampling.Iw : upsampling.Iu
+        ub = (k - 1) * q2
+        for u in 1:q2
+            r = x0 - upsampling.x[ub+u]
+            (r[1] == 0 && r[2] == 0) && continue
+            Ks = _kv(V, kern(i, r), upsampling.w[ub+u])
+            for jj in 1:p, ii in 1:p
+                c = I_[u, ii + (jj - 1) * p]
+                W[ii, jj] -= c * Ks
+            end
+        end
+    else
+        for jj in 1:p, ii in 1:p
+            j = base + ii + (jj - 1) * p
+            j == jself && continue
+            r = x0 - ad.x[j]
+            if !(selfmode && j == i) && (r[1] != 0 || r[2] != 0)
+                W[ii, jj] -= _kv(V, kern(i, r), ad.w[j])
+            end
+        end
+    end
+    W
+end
+
+_acc_type(::Val{0}) = SVector{4,Float64}
+_acc_type(::Val{M}) where {M} = SVector{M,Float64}
+
+# pass 2: the weights of every pair. Val(0): the 2×2 form, interleaved (2N × 2Nt); Val(M): M scalar corrections
+# (N × Nt each) on one pattern
+function _correction_pass(::Val{M}, ad::AreaDisc, kern::F, X, geo, qo, selfmode, target_info, detect_on_panel,
+                          upsampling, transposed, stats) where {M,F}
+    p = ad.p; p2 = p * p; N = length(ad); Nt = length(X)
+    near = geo.near
+    nb = M == 0 ? 2 : 1                            # columns per target, entries per node in a column
+    colptr = Vector{Int}(undef, nb * Nt + 1)
     colptr[1] = 1
-    for i in 1:Nt
-        len = 2 * p2 * length(near[i])
-        colptr[2i] = colptr[2i-1] + len
-        colptr[2i+1] = colptr[2i] + len
+    for i in 1:Nt, c in 1:nb
+        colptr[nb*(i-1)+c+1] = colptr[nb*(i-1)+c] + nb * p2 * length(near[i])
     end
     nnzt = colptr[end] - 1
     rowval = Vector{Int}(undef, nnzt)
-    nzval = Vector{Float64}(undef, nnzt)
-    # pass 2: weights
+    nzval = [Vector{Float64}(undef, nnzt) for _ in 1:max(M, 1)]
     nthr = Threads.nthreads()
     nextt = Threads.Atomic{Int}(1)
     npts = Threads.Atomic{Int}(0)
     qmx = max(qo.qmax_box, qo.qmax_v)
     Threads.@threads for _ in 1:nthr
-        wk = _AQWork(p, qmx)
+        wk = _AQWork{_acc_type(Val(M))}(p, qmx)
         while true
             i = Threads.atomic_add!(nextt, 1)
             i > Nt && break
             x0 = X[i]
-            pos1 = colptr[2i-1]; pos2 = colptr[2i]
             for (m, k) in enumerate(near[i])
                 k = Int(k)
-                P = ad.panels[k]
-                on = nothing
-                jself = 0
-                if selfmode
-                    if (i - 1) ÷ p2 + 1 == k
-                        on = (ad.st[i][1], ad.st[i][2]); jself = i
+                W = _pair_weights!(wk, ad, kern, i, x0, k, geo, qo, selfmode, target_info, detect_on_panel, upsampling)
+                base = (k - 1) * p2
+                if M == 0
+                    pos1 = colptr[2i-1]; pos2 = colptr[2i]; nz = nzval[1]
+                    for jj in 1:p, ii in 1:p
+                        l = ii + (jj - 1) * p
+                        j = base + l
+                        w11, w21, w12, w22 = W[ii, jj]
+                        off = ((m - 1) * p2 + (l - 1)) * 2
+                        # column 2i-1 (row component 1 of C): entries (2j-1, 2j) ← W[1,1], W[1,2]
+                        rowval[pos1+off] = 2j - 1; nz[pos1+off] = w11
+                        rowval[pos1+off+1] = 2j; nz[pos1+off+1] = w12
+                        rowval[pos2+off] = 2j - 1; nz[pos2+off] = w21
+                        rowval[pos2+off+1] = 2j; nz[pos2+off+1] = w22
                     end
                 else
-                    if target_info !== nothing && target_info[i][1] == k
-                        on = (target_info[i][2][1], target_info[i][2][2])
-                    elseif detect_on_panel && norm(x0 - cen[k]) <= 1.05crad[k]
-                        fl, s0, t0 = _on_panel(P, x0, diam[k])
-                        fl && (on = (s0, t0))
-                    end
-                end
-                W = _local_weights!(wk, ad, k, kern, i, x0, on, qo, tpan[k])
-                base = (k - 1) * p2
-                if upsampling !== nothing
-                    # subtract the upsampled smooth rule: Σ_u K(x0 − y_u) ω_u ℓ_l(y_u)
-                    q2 = upsampling.q^2
-                    I_ = ad.panels[k].weighted ? upsampling.Iw : upsampling.Iu
-                    ub = (k - 1) * q2
-                    for u in 1:q2
-                        r = x0 - upsampling.x[ub+u]
-                        (r[1] == 0 && r[2] == 0) && continue
-                        Ks = SMatrix{2,2,Float64,4}(kern(i, r)) * upsampling.w[ub+u]
-                        for jj in 1:p, ii in 1:p
-                            c = I_[u, ii + (jj - 1) * p]
-                            W[ii, jj] -= c * SVector{4,Float64}(Ks)
+                    pos = colptr[i] + (m - 1) * p2
+                    for jj in 1:p, ii in 1:p
+                        l = ii + (jj - 1) * p
+                        rowval[pos+l-1] = base + l
+                        w = W[ii, jj]
+                        for c in 1:M
+                            nzval[c][pos+l-1] = w[c]
                         end
                     end
-                end
-                for jj in 1:p, ii in 1:p
-                    l = ii + (jj - 1) * p
-                    j = base + l
-                    w11, w21, w12, w22 = W[ii, jj]
-                    if upsampling === nothing && j != jself
-                        r = x0 - ad.x[j]
-                        if !(selfmode && j == i) && (r[1] != 0 || r[2] != 0)
-                            Ks = SMatrix{2,2,Float64,4}(kern(i, r)) * ad.w[j]
-                            w11 -= Ks[1]; w21 -= Ks[2]; w12 -= Ks[3]; w22 -= Ks[4]
-                        end
-                    end
-                    off = ((m - 1) * p2 + (l - 1)) * 2
-                    # column 2i-1 (row component 1 of C): entries (2j-1, 2j) ← W[1,1], W[1,2]
-                    rowval[pos1+off] = 2j - 1; nzval[pos1+off] = w11
-                    rowval[pos1+off+1] = 2j; nzval[pos1+off+1] = w12
-                    rowval[pos2+off] = 2j - 1; nzval[pos2+off] = w21
-                    rowval[pos2+off+1] = 2j; nzval[pos2+off+1] = w22
                 end
             end
         end
         Threads.atomic_add!(npts, wk.npts)
     end
-    Ct = SparseMatrixCSC(2N, 2Nt, colptr, rowval, nzval)
     if stats !== nothing
         stats[:pairs] = sum(length, near)
         stats[:kernel_evals] = npts[]
         stats[:nnz] = nnzt
     end
-    return transposed ? Ct : copy(transpose(Ct))
+    if M == 0
+        Ct = SparseMatrixCSC(2N, 2Nt, colptr, rowval, nzval[1])
+        return transposed ? Ct : copy(transpose(Ct))
+    end
+    Cts = [SparseMatrixCSC(N, Nt, colptr, rowval, nzval[c]) for c in 1:M]
+    transposed && return Cts
+    # Cᶜ = (Cᶜᵀ)ᵀ: one transpose of the pattern (a permutation), applied to every component
+    perm = SparseMatrixCSC(N, Nt, colptr, rowval, collect(1.0:nnzt))
+    Pt = copy(transpose(perm))
+    idx = round.(Int, Pt.nzval)
+    [SparseMatrixCSC(Nt, N, Pt.colptr, Pt.rowval, nzval[c][idx]) for c in 1:M]
 end

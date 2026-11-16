@@ -276,3 +276,32 @@ end
     @test nnz(E1.C[1]) > nnz(Evaluator(LaplaceKernel3D(), ad; tol).C[1])
     @test_throws ArgumentError Evaluator(LaplaceKernel3D(), ad; density=:smooth, upsampling=AreaUpsampling(ad, 12))
 end
+
+@testset "several scalar kernels in one pass (ncomp)" begin
+    p = 8
+    bp, ap = disk_mesh(6, 0.7)
+    ad = AreaDisc(ap, p); bd = BoundaryDisc(bp, p)
+    N = length(ad); info = boundary_target_info(ad, bd)
+    ks = (r -> 1 / (4π * norm(r)), r -> r[1] / (2π * norm(r)^2), r -> log(norm(r)) / 2π,
+          r -> r[1] * r[2] / (2π * norm(r)^3), r -> norm(r) * log(norm(r)))
+    K5(r) = SVector(ntuple(c -> ks[c](r), 5))
+    gI(c) = r -> (g = ks[c](r); SMatrix{2,2,Float64,4}(g, 0, 0, g))
+    for kw in ((;), (; targets=bd.x, target_info=info), (; targets=bd.x), (; upsampling=AreaUpsampling(ad, 12)))
+        C = area_correction(ad, K5; ncomp=5, tol=1e-8, kw...)
+        @test length(C) == 5 && all(c -> size(c) == (length(get(kw, :targets, ad.x)), N), C)
+        @test all(c -> C[c].colptr === C[1].colptr && C[c].rowval === C[1].rowval, 2:5)
+        for c in 1:5
+            # the same as the scalar kernel alone, and as slot [1, 1] of its 2×2 form g·I
+            @test C[c] == area_correction(ad, ks[c]; ncomp=1, tol=1e-8, kw...)[1]
+            @test C[c] == area_correction(ad, gI(c); tol=1e-8, kw...)[1:2:end, 1:2:end]
+        end
+        Ct = area_correction(ad, K5; ncomp=5, tol=1e-8, transposed=true, kw...)
+        @test all(c -> Ct[c] == sparse(transpose(C[c])), 1:5)
+    end
+    # four components are the 2×2 form's entries (column-major), a target-dependent K(i, r) too
+    Kt = (i, r) -> T2(r, bd.n[i])
+    C2 = area_correction(ad, Kt; targets=bd.x, target_info=info, tol=1e-10)
+    C4 = area_correction(ad, (i, r) -> SVector{4,Float64}(T2(r, bd.n[i])); ncomp=4, targets=bd.x, target_info=info, tol=1e-10)
+    @test all(c -> C4[c] == C2[(c-1)%2+1:2:end, (c-1)÷2+1:2:end], 1:4)
+    @test_throws ArgumentError area_correction(ad, K5; ncomp=0)
+end
