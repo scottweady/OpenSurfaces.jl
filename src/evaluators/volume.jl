@@ -23,7 +23,7 @@ struct VolumePotentials
     R::Float64                          # R(Ω) = (|Ω|/π)^{1/2}
     κ::Float64                          # of the deep bilaplacian kernel (with a remainder: its κ at R)
     EV::Union{Nothing,Evaluator}        # ∇V at (area, Γ)
-    E0::Union{Nothing,Evaluator}        # V at the area nodes
+    E0::Union{Nothing,Evaluator}        # V at the area and Γ nodes (`volume_potential` returns the area values)
     EB::Union{Nothing,Evaluator}        # ∇B at (area, Γ)
 end
 
@@ -42,10 +42,16 @@ function VolumePotentials(ad::AreaDisc, bd::BoundaryDisc; κ=0.0, remainder=noth
     area = sum(dot(x, n) * w for (x, n, w) in zip(bd.x, bd.n, bd.w)) / 2
     R = sqrt(area / π)
     κ = Float64(κ isa Function ? κ(R) : κ)
-    ev(K; kw...) = Evaluator(K, ad; bd=bd, density=:smooth, tol=tol, eps=eps, kw...)
-    VolumePotentials(ad, bd, R, κ, grad || potential ? ev(LaplaceGradient2D(); targets=(:area, :boundary)) : nothing,
-                     potential ? ev(LaplaceKernel2D()) : nothing,
-                     buoyancy ? ev(BiharmonicGradient2D(; κ, R); targets=(:area, :boundary), remainder) : nothing)
+    # one correction pass for all the kernels asked for (`Evaluator((K1, K2, …), ad)`), at the area and Γ nodes (V's
+    # Γ values are not used: they cost little against a second pass)
+    ks = Any[]; rs = Any[]
+    (grad || potential) && (push!(ks, LaplaceGradient2D()); push!(rs, nothing))
+    potential && (push!(ks, LaplaceKernel2D()); push!(rs, nothing))
+    buoyancy && (push!(ks, BiharmonicGradient2D(; κ, R)); push!(rs, remainder))
+    es = isempty(ks) ? () : Evaluator(Tuple(ks), ad; bd=bd, density=:smooth, tol=tol, eps=eps, targets=(:area, :boundary),
+                                      remainder=Tuple(rs))
+    i = 0; take(on) = on ? es[i+=1] : nothing
+    VolumePotentials(ad, bd, R, κ, take(grad || potential), take(potential), take(buoyancy))
 end
 
 """∇V_Ω[g] at the area nodes and at Γ, for physical nodal values g: `(area, bdry)`."""
@@ -60,7 +66,7 @@ end
 function volume_potential(VP::VolumePotentials, g::AbstractVector{<:Real})
     VP.E0 === nothing && error("volume_potential: construct the VolumePotentials with potential=true")
     ua, ub = VP.EV(g)
-    (V=VP.E0(g), area=ua, bdry=ub)
+    (V=VP.E0(g)[1], area=ua, bdry=ub)                    # E0 at (area, Γ): the area values
 end
 
 """∇B_{Ω,κ}[σ] at the area nodes and at Γ, for physical nodal values σ: `(area, bdry)`."""
