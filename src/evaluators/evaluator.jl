@@ -176,6 +176,55 @@ end
 function Evaluator(K, ad::AreaDisc; targets=:area, bd=nothing, density::Symbol=:stored, fast::Symbol=:auto,
                    remainder=nothing, plan=nothing, tol::Real=DEFAULT_TOL, eps::Real=tol, near_factor=nothing,
                    opts=nothing, upsampling=nothing)
+    _check_area_args(ad, density, remainder, upsampling)
+    ckw = (; tol, near_factor, opts, upsampling)
+    sets = targets isa Tuple ? collect(targets) : [targets]
+    srcd, ainfo, smooth = _source_mesh(ad, density)
+    sh, Kc = _correction_setup(K, remainder, ad)
+    C = [_slots(c, sh) for c in _set_corrections(srcd, ad, Kc, sets, bd, density, ainfo, ckw)]
+    _area_evaluator(K, remainder, sh, C, ad, srcd, smooth, sets, bd, density, fast, plan, upsampling, eps)
+end
+
+"""
+    Evaluator((K1, K2, …), ad::AreaDisc; remainder=nothing, kw...) -> (E1, E2, …)
+
+Evaluators of several kernels on the same mesh, targets and `density`, their near corrections from one pass of
+`area_correction` (`ncomp`: the rules are built once for all the kernels' slots, see `kernel_shape`). Each is the same
+as `Evaluator(Kk, ad; remainder = remainder[k], kw...)`; `remainder` is `nothing` or a tuple with one entry
+(`nothing` or a `SymbolKernel`) per kernel. The other keywords are shared, except `plan` (not taken here).
+"""
+function Evaluator(Ks::Tuple, ad::AreaDisc; targets=:area, bd=nothing, density::Symbol=:stored, fast::Symbol=:auto,
+                   remainder=nothing, plan=nothing, tol::Real=DEFAULT_TOL, eps::Real=tol, near_factor=nothing,
+                   opts=nothing, upsampling=nothing)
+    n = length(Ks)
+    n >= 1 || throw(ArgumentError("Evaluator: no kernels"))
+    plan === nothing || throw(ArgumentError("Evaluator: `plan` is for one kernel"))
+    Rs = remainder === nothing ? ntuple(_ -> nothing, n) : remainder
+    Rs isa Tuple && length(Rs) == n ||
+        throw(ArgumentError("Evaluator: with several kernels, `remainder` is a tuple of one entry per kernel"))
+    for R in Rs
+        _check_area_args(ad, density, R, upsampling)
+    end
+    ckw = (; tol, near_factor, opts, upsampling)
+    sets = targets isa Tuple ? collect(targets) : [targets]
+    srcd, ainfo, smooth = _source_mesh(ad, density)
+    setups = [_correction_setup(Ks[k], Rs[k], ad) for k in 1:n]
+    # the slots each kernel's potential uses, as column-major entries of its 2×2 form
+    lins = Tuple(sh == (1, 1) ? (1,) : sh == (2, 1) ? (1, 2) : (1, 2, 3, 4) for (sh, _) in setups)
+    M = sum(length, lins)
+    stk = _Stacked{M}(Tuple(_wrap_kernel(Kc) for (_, Kc) in setups), lins)
+    Cm = _set_corrections(srcd, ad, stk, sets, bd, density, ainfo, ckw; ncomp=M, transposed=true)
+    o = 0
+    out = map(1:n) do k
+        sh = setups[k][1]; l = lins[k]
+        C = [_slots(copy(transpose(_interleave(Cs[o+1:o+length(l)], l))), sh) for Cs in Cm]
+        o += length(l)
+        _area_evaluator(Ks[k], Rs[k], sh, C, ad, srcd, smooth, sets, bd, density, fast, nothing, upsampling, eps)
+    end
+    Tuple(out)
+end
+
+function _check_area_args(ad, density, remainder, upsampling)
     density in (:stored, :smooth) || throw(ArgumentError("Evaluator: density is :stored or :smooth"))
     if upsampling !== nothing
         density === :stored && remainder === nothing ||
@@ -183,37 +232,86 @@ function Evaluator(K, ad::AreaDisc; targets=:area, bd=nothing, density::Symbol=:
         length(upsampling.x) == npanels(ad) * upsampling.q^2 ||
             throw(ArgumentError("Evaluator: the AreaUpsampling is not of this mesh"))
     end
-    ckw = (; tol, near_factor, opts, upsampling)
-    sets = targets isa Tuple ? collect(targets) : [targets]
+    nothing
+end
+
+# the mesh the sources live on (the unweighted copy for smooth densities), the area targets' panels on it
+function _source_mesh(ad, density)
     if density === :smooth
-        srcd, Iw, ainfo = _unweighted_copy(ad); smooth = (ad, Iw)
-    else
-        srcd = ad; ainfo = nothing; smooth = nothing
+        srcd, Iw, ainfo = _unweighted_copy(ad)
+        return srcd, ainfo, (ad, Iw)
     end
-    trg = Vector{Vec2}[]; C = SparseMatrixCSC{Float64,Int}[]
+    ad, nothing, nothing
+end
+
+# the kernel's shape and the 2×2 form its corrections take
+function _correction_setup(K, remainder, ad)
     sh = kernel_shape(K); Kc = _correction_kernel(K, _probe_kernel(K, sh, ad.x))
-    whole = _whole_corrections(K, remainder)
-    whole && (Kc = _WholeKernel(K, remainder))
-    for t in sets
+    _whole_corrections(K, remainder) && (Kc = _WholeKernel(K, remainder))
+    sh, Kc
+end
+
+# the corrections of every target set (`kw`: `ncomp`, `transposed` for several kernels at once)
+function _set_corrections(srcd, ad, Kc, sets, bd, density, ainfo, ckw; kw...)
+    map(sets) do t
         if t === :area
-            push!(trg, ad.x)
-            push!(C, density === :stored ? area_correction(srcd, Kc; ckw...) :
-                                           area_correction(srcd, Kc; targets=ad.x, target_info=ainfo, ckw...))
+            density === :stored ? area_correction(srcd, Kc; ckw..., kw...) :
+                                  area_correction(srcd, Kc; targets=ad.x, target_info=ainfo, ckw..., kw...)
         elseif t === :boundary
             bd === nothing && throw(ArgumentError("Evaluator: targets = :boundary needs `bd`"))
-            push!(trg, bd.x)
-            push!(C, area_correction(srcd, Kc; targets=bd.x, target_info=boundary_target_info(srcd, bd), ckw...))
+            area_correction(srcd, Kc; targets=bd.x, target_info=boundary_target_info(srcd, bd), ckw..., kw...)
         else
-            X = collect(Vec2, t); push!(trg, X)
-            push!(C, area_correction(srcd, Kc; targets=X, ckw...))
+            area_correction(srcd, Kc; targets=collect(Vec2, t), ckw..., kw...)
         end
     end
-    C = [_slots(c, sh) for c in C]
+end
+
+function _area_evaluator(K, remainder, sh, C, ad, srcd, smooth, sets, bd, density, fast, plan, upsampling, eps)
+    trg = Vector{Vec2}[t === :area ? ad.x : t === :boundary ? bd.x : collect(Vec2, t) for t in sets]
     src, w = upsampling === nothing ? (srcd.x, srcd.w) : (upsampling.x, upsampling.w)
     self = density === :stored && sets == [:area] && upsampling === nothing
     far = _area_far(K, remainder, fast, plan, src, trg, self, C, eps)
-    Evaluator(K, remainder, sh, src, w, smooth, upsampling === nothing ? nothing : (upsampling, ad), ad, trg, C, far,
-              Float64(eps))
+    Evaluator(K, remainder, sh, src, w, smooth, upsampling === nothing ? nothing : (upsampling, ad), ad, trg,
+              Vector{SparseMatrixCSC{Float64,Int}}(C), far, Float64(eps))
+end
+
+"""Several kernels' 2×2 forms as one K(i, r)::SVector{M}: the entries `lins[k]` (column-major) of kernel k, in order."""
+struct _Stacked{M,T,L}
+    ks::T
+    lins::L
+end
+_Stacked{M}(ks::T, lins::L) where {M,T,L} = _Stacked{M,T,L}(ks, lins)
+@inline (S::_Stacked{M})(i::Int, r::Vec2) where {M} = SVector{M,Float64}(_stack(S.ks, S.lins, i, r))
+@inline _stack(::Tuple{}, ::Tuple{}, i, r) = ()
+@inline function _stack(ks::Tuple, ls::Tuple, i, r)
+    v = SMatrix{2,2,Float64,4}(first(ks)(i, r))
+    (map(l -> v[l], first(ls))..., _stack(Base.tail(ks), Base.tail(ls), i, r)...)
+end
+
+# The transposed 2×2-form correction (2N × 2Nt, interleaved, the layout `area_correction` assembles) from the scalar
+# transposed corrections of its entries `lins` (one pattern; absent entries are zeros, which `_slots` drops)
+function _interleave(Cs, lins)
+    C1 = Cs[1]; N, Nt = size(C1)
+    has = [l in lins for l in 1:4]
+    ent = Vector{Float64}[has[l] ? Cs[findfirst(==(l), lins)].nzval : Float64[] for l in 1:4]
+    val(l, q) = has[l] ? ent[l][q] : 0.0
+    nn = nnz(C1)
+    colptr = Vector{Int}(undef, 2Nt + 1); colptr[1] = 1
+    rowval = Vector{Int}(undef, 4nn); nzval = Vector{Float64}(undef, 4nn)
+    for i in 1:Nt
+        len = 2 * (C1.colptr[i+1] - C1.colptr[i])
+        colptr[2i] = colptr[2i-1] + len; colptr[2i+1] = colptr[2i] + len
+        p1 = colptr[2i-1]; p2 = colptr[2i]
+        for (m, q) in enumerate(C1.colptr[i]:C1.colptr[i+1]-1)
+            j = C1.rowval[q]; off = 2(m - 1)
+            # column 2i-1: W[1,1], W[1,2] (entries 1, 3); column 2i: W[2,1], W[2,2] (entries 2, 4)
+            rowval[p1+off] = 2j - 1; nzval[p1+off] = val(1, q)
+            rowval[p1+off+1] = 2j; nzval[p1+off+1] = val(3, q)
+            rowval[p2+off] = 2j - 1; nzval[p2+off] = val(2, q)
+            rowval[p2+off+1] = 2j; nzval[p2+off+1] = val(4, q)
+        end
+    end
+    SparseMatrixCSC(2N, 2Nt, colptr, rowval, nzval)
 end
 
 function Evaluator(K, bd::BoundaryDisc; targets, fast::Symbol=:auto, tol::Real=DEFAULT_TOL, eps::Real=tol)

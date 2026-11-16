@@ -6,6 +6,13 @@ sparse matrix (`area_correction`, `line_correction`) in an interleaved 2×2 layo
 panel's parameter space and treat the kernel as a black box ``K(r)`` or ``K(i, r)`` returning a 2×2 matrix (a
 scalar kernel is carried in one slot), so they serve every kernel, including yours.
 
+The rules depend on the geometry only (the target and the panel), not on the kernel, and most of a pass is spent
+building them and contracting with the Lagrange basis. Several scalar kernels on the same targets therefore share one
+pass: `area_correction(ad, K; ncomp = M)` takes a kernel returning ``M`` components (an `SVector{M}`, a tuple, or a
+number for ``M = 1``) and returns ``M`` scalar corrections (``N_t \times N`` each, one sparsity pattern), each the
+same as that of its component alone. `Evaluator((K1, K2, …), ad; …)` builds the evaluators of several kernels on the
+same mesh, targets and density from one such pass (identical to building them one at a time).
+
 ## Area sources
 
 For a target ``x`` and an area panel, the weights ``W_m`` (one 2×2 block per node of the panel) satisfy

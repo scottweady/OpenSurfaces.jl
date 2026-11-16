@@ -280,3 +280,42 @@ end
     @test_throws DimensionMismatch E * ones(N)
     @test_throws ArgumentError local_blocks(Eg, panel_groups(ad))
 end
+
+@testset "several kernels from one correction pass: the same evaluators as one at a time" begin
+    tol = 1e-6; p = 10
+    bd, ad, _ = build_mesh(discretize_curve(θ -> Vec2(1.5cos(θ), 0.8sin(θ)), p; tol=1e-4), p; edge_layers=2)
+    g = [1 + 0.3sin(2x[1]) * cos(x[2]) for x in ad.x]
+    # remainders: the 3D Laplace kernel at depth 0.3, the bilaplacian gradient at depth H (test_volume.jl)
+    RL = SymbolKernel(k -> tanh(0.3k) / (2k); base=LaplaceKernel3D(), scale=0.3, outputs=(:value,),
+                      remainder=k -> -1 / (k * (exp(0.6k) + 1)))
+    function Φ(x)
+        x < 0.1 && return x^4 * evalpoly(x^2, (1 / 10, -163 / 3150, 49 / 2250, -80614 / 9095625, 19115233 / 5320940625))
+        x > 30 && return 1.0
+        t = tanh(x); ic2 = 1 / cosh(x)^2
+        (t^3 - x^3 * ic2) / (t - x * ic2)
+    end
+    H = 0.5; c0 = -1 + 2 * 1.3476268494 - 2log(2H)
+    RB = SymbolKernel(k -> Φ(k * H) / k^4; base=LaplaceKernel3D(), scale=H, outputs=(:gradient,), regularize=true,
+                      remainder=k -> (Φ(k * H) - 1) / k^4, q=24, nq=20, far=ρ -> (-(2log(ρ) + c0) / 8π,))
+    Ks = (LaplaceKernel2D(), LaplaceGradient2D(), BiharmonicGradient2D(; κ=0.3), BiharmonicGradient2D(c0),
+          LaplaceKernel3D())
+    Rs = (nothing, nothing, nothing, RB, RL)
+    same(E, F) = E.C == F.C && E.trg == F.trg && E.src == F.src && E.w == F.w && typeof(E.far) == typeof(F.far)
+    Es = Evaluator(Ks, ad; bd, density=:smooth, targets=(:area, :boundary), remainder=Rs, tol)
+    for k in eachindex(Ks)
+        E1 = Evaluator(Ks[k], ad; bd, density=:smooth, targets=(:area, :boundary), remainder=Rs[k], tol)
+        @test same(Es[k], E1)
+        @test Es[k](g) == E1(g)
+    end
+    # stored densities on the area nodes, and points
+    F = [Vec2(cos(x[2]), x[1]) for x in ad.x]
+    pts = [Vec2(0.5cos(t), 0.3sin(t)) for t in range(0, 2π; length=40)]
+    for tg in (:area, pts)
+        Es = Evaluator((LaplaceKernel3D(), LaplaceGradient2D(), Stokeslet3D()), ad; targets=tg, tol)
+        for (k, K) in enumerate((LaplaceKernel3D(), LaplaceGradient2D(), Stokeslet3D()))
+            @test same(Es[k], Evaluator(K, ad; targets=tg, tol))
+        end
+        @test Es[3](F) == Evaluator(Stokeslet3D(), ad; targets=tg, tol)(F)
+    end
+    @test_throws ArgumentError Evaluator((LaplaceKernel2D(), LaplaceKernel3D()), ad; remainder=RL)
+end
