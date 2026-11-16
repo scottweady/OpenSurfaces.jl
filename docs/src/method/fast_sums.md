@@ -12,6 +12,8 @@ An `Evaluator` picks the sum by the kernel's type:
 | `MHKernel`, `MHNormalKernel` | FMM2D (Helmholtz at the imaginary wavenumber ``ik``; default), or Ewald + NUFFT (`RadialEwald2D`, `fast = :ewald`) |
 | `StokesKernel(μ_2D, μ_3D)` (G2 + G3) | Ewald + NUFFT (`EwaldStokes3D` with `μ_2D`; default) |
 | `SymbolKernel` of base `Stokeslet3D` or `LaplaceKernel3D` | Ewald + NUFFT of the whole kernel (default) |
+| `BiharmonicGradient2D` + a `remainder` with a far field | Ewald + NUFFT of the whole kernel (`RadialEwald2D`, `out = :bgrad`; default) |
+| `LaplaceKernel3D` or `BiharmonicGradient2D` + a `remainder` without one | local sum over the pairs closer than ``\rho_c`` |
 | any other | direct |
 
 With few targets the default is the direct sum instead, for every kernel above summed by Ewald by default: an Ewald
@@ -106,6 +108,17 @@ and the short range decays like ``E_1(\rho^2/\sigma^2)``. For ``\log\rho`` both 
 ``-E_1(U)/4\pi``); for ``K_0`` the long range is tabulated once per plan on ``\rho \le \sqrt{40}\,\sigma`` and equals
 ``K_0`` beyond. A gradient multiplies the multiplier by ``i\xi``. `BiharmonicGradient2D` is three log sums and moments,
 as on its FMM path.
+
+With a remainder (a finite depth: symbol ``\Phi(kH)/k^4`` over the deep ``1/k^4``), `out = :bgrad` sums the whole
+kernel ``r f(\rho)``, ``f = (2\log\rho + c_0)/8\pi + q(\rho)``, with ``q`` the remainder's regularized `:gradient`
+and ``c_0`` the deep kernel's, which together make ``f`` decay. The same split of ``\log\rho`` gives the short range
+``-r E_1(U)/8\pi`` and the long range ``r[(2\log_L\rho + c_0)/8\pi + q]``, sampled as a two-component kernel, so the
+deep part and ``q`` cancel when the multiplier is built rather than in each apply (the moments of the deep path would
+lose about ``L\log L/H`` in relative accuracy). An apply is one type-1 NUFFT, a 2 × 1 multiplier and a type-2 NUFFT
+with two outputs. Both parts vanish at ``r = 0``. The grid resolves ``q`` (``\sigma \le cH/10``), and the remainder's
+table or its far field must reach the long-range window. The plan checks that ``f`` decays at the table's end, which
+catches a ``c_0`` (a ``\kappa``) that is not the remainder's. On a film 9 across at ``H = 2``, eps 1e-7, 72k nodes,
+an apply takes 0.2 s against 32 s for the local sum, which is all-pairs there (``\rho_c = 20.5``).
 
 `FilmEwald` evaluates, on one grid, all the far-field sums of a coupled 2D + 3D Stokes operator on a surface and its
 edge: the area-to-area velocity ``\sum_j [G_2 + G_3](x_i - y_j)f_j``, the edge-to-area velocity

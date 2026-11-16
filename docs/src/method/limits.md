@@ -53,6 +53,9 @@ boundary.
 - The table of a `SymbolKernel` used as the kernel itself under Ewald must reach the long-range window (the point
   set's extent plus about ``11\sigma``): build it with a larger ``\rho_c`` or a far field otherwise.
 - `regularize` (a remainder not integrable at ``k = 0``) applies to the scalar `:gradient` output only.
+- A remainder without a far field is summed locally, over the pairs closer than ``\rho_c``, which is all-pairs
+  (``O(N^2)``) when ``\rho_c`` exceeds the film. With a far field, `BiharmonicGradient2D` sums it by Ewald; for
+  `LaplaceKernel3D`, use the `SymbolKernel` itself as the kernel.
 
 ## Fast sums
 

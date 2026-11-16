@@ -11,10 +11,11 @@
 # with the weighted rule instead converges only algebraically (5e-5 in ∇V on the unit disc).
 # A `remainder` (a scalar `SymbolKernel` with the regularized :gradient, e.g. a finite-depth buoyancy
 # kernel K_H): ∇B is replaced by the deep kernel at κ (given, or a function of R) plus the
-# smooth q(ρ) r, summed directly over the pairs closer than ρ_c (the whole kernel decays exponentially; an FMM of the
-# deep part alone would cancel against the remainder). The near corrections are those of the deep kernel (the
-# remainder is smooth), so ρ_c covers every corrected pair; ρ_c is where the envelope of ρ|∇K| falls below eps of its
-# maximum.
+# smooth q(ρ) r. The whole kernel decays exponentially (an FMM of the deep part alone would cancel against the
+# remainder): with a far field on the remainder it is summed by Ewald (`RadialEwald2D`, out = :bgrad, the whole kernel
+# in the long-range multiplier); without one, directly over the pairs closer than ρ_c, where the envelope of ρ|∇K|
+# falls below eps of its maximum (all pairs when ρ_c exceeds the film). The near corrections are those of the deep
+# kernel (the remainder is smooth).
 
 struct VolumePotentials
     ad::AreaDisc                        # targets (the film mesh)
@@ -32,8 +33,9 @@ end
 
 ∇V_Ω (with `grad`) and ∇B_{Ω,κ} (with `buoyancy`) at the area and Γ nodes, and (with `potential`) V_Ω itself at the
 area nodes. A `remainder` (scalar `SymbolKernel`, regularized :gradient) makes `volume_bgrad` the deep kernel at κ
-plus the remainder, summed locally; `κ` may then be a function of R(Ω). `tol` for the near corrections, `eps` for
-the FMM (with a remainder: the relative size of the truncated kernel).
+plus the remainder, summed by Ewald when the remainder has a far field and locally otherwise (all pairs when the
+kernel's range exceeds the film); `κ` may then be a function of R(Ω). `tol` for the near corrections, `eps` for the
+FMM (with a remainder: the Ewald plan, or the relative size of the truncated kernel).
 """
 function VolumePotentials(ad::AreaDisc, bd::BoundaryDisc; κ=0.0, remainder=nothing, tol::Real=DEFAULT_TOL, eps::Real=tol,
                           grad::Bool=true, buoyancy::Bool=true, potential::Bool=false)

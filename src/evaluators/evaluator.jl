@@ -12,8 +12,9 @@
 #      copy of the mesh for smooth densities given as physical values (`density = :smooth`; `:stored` takes the
 #      mesh's own, edge-weighted, values), and the slots of the 2×2 kernel form that the potential uses;
 #   4. a `remainder` (`SymbolKernel`) added to its base kernel: with a far field, in the fast sum (Ewald's long-range
-#      multiplier); without one, the whole kernel (base + remainder, which decays) is summed directly over the pairs
-#      closer than ρc, checked to lie inside the table.
+#      multiplier: Stokeslet3D, and BiharmonicGradient2D, whose whole kernel is sampled there); without one, the whole
+#      kernel (base + remainder, which decays) is summed directly over the pairs closer than ρc, checked to lie inside
+#      the table. That local sum is all-pairs when ρc exceeds the film (a finite depth comparable to its size).
 
 """
     kernel_shape(K) -> (nout, nin)
@@ -88,7 +89,9 @@ end
     Mat2(g, 0, 0, g)
 end
 @inline function (W::_WholeKernel{BiharmonicGradient2D})(r::Vec2)
-    ρ = norm(r); f = ((ρ == 0 ? 0.0 : 2log(ρ)) + W.base.c0) / 8π + W.R.table(ρ)[1]
+    ρ = norm(r)
+    q = ρ < W.R.table.ρc || W.R.far === nothing ? W.R.table(ρ)[1] : W.R.far(ρ)[1]
+    f = ((ρ == 0 ? 0.0 : 2log(ρ)) + W.base.c0) / 8π + q
     Mat2(r[1] * f, r[2] * f, 0, 0)
 end
 
@@ -111,7 +114,7 @@ struct _EwaldLaplaceFar
 end
 struct _RadialEwaldFar
     plan::RadialEwald2D                  # targets: all the sets, concatenated
-    kind::Symbol                         # :value, :gradient, :normal, :bgrad
+    kind::Symbol                         # :value, :gradient, :normal, :bgrad (deep, by moments), :bgrad_whole
 end
 struct _RFMM2DFar
     kind::Symbol                         # :value, :gradient, :bgrad
@@ -140,8 +143,10 @@ matrix of a direct-sum evaluator.
   `SymbolKernel` of either 3D base, but the direct sum below about 2000 targets at eps 1e-6, 12000 at 1e-10;
   FMM2D for the 2D kernels; direct sums for other callables), `:ewald`, `:fmm`, `:direct`.
 - `remainder`: a `SymbolKernel` added to `K` (head of src/evaluators/evaluator.jl); for `Stokeslet3D` at
-  μ = 1 (scaled with `K`), into Ewald's multiplier; for `LaplaceKernel3D` and `BiharmonicGradient2D` without a far
-  field, a local sum over the pairs closer than ρc (where the kernel's tail falls below `eps`).
+  μ = 1 (scaled with `K`), into Ewald's multiplier; for `BiharmonicGradient2D` with a far field, Ewald of the whole
+  kernel (`RadialEwald2D(:log; out = :bgrad)`; the local sum under `fast = :direct` or, with `:auto`, few targets);
+  for `LaplaceKernel3D` and `BiharmonicGradient2D` without a far field, a local sum over the pairs closer than ρc
+  (where the kernel's tail falls below `eps`), all-pairs when ρc exceeds the film.
 - `plan`: an existing `EwaldStokes3D` (`EwaldLaplace3D`: targets = all the sets, concatenated) plan of the same
   sources and targets to reuse.
 - `near_factor`, `opts`, `upsampling`: passed to `area_correction`. With an `AreaUpsampling` of `ad` (stored
@@ -246,9 +251,21 @@ function _area_far(K::Stokeslet3D, R, fast, plan, src, trg, self, C, eps)
                      EwaldStokes3D(src, trg[1]; μ_3D=K.μ, remainder=R, tol=eps))
 end
 function _area_far(K::Union{LaplaceKernel3D,BiharmonicGradient2D}, R, fast, plan, src, trg, self, C, eps)
+    if R !== nothing && K isa BiharmonicGradient2D && R.far !== nothing
+        # Ewald of the whole kernel (the long range samples deep part + remainder, which cancel to a decaying kernel)
+        fast in (:auto, :ewald, :direct) ||
+            throw(ArgumentError("Evaluator: fast = :auto, :ewald or :direct for BiharmonicGradient2D with a remainder"))
+        if fast === :ewald || (fast === :auto && !_few_targets(trg, eps))
+            X = reduce(vcat, trg)
+            kw = (; out=:bgrad, remainder=R, c0=K.c0, tol=eps)
+            return _RadialEwaldFar(length(trg) == 1 && X == src ? RadialEwald2D(:log, src; kw...) :
+                                                                RadialEwald2D(:log, src, X; kw...), :bgrad_whole)
+        end
+    end
     if R !== nothing
-        R.far === nothing || throw(ArgumentError("Evaluator: a remainder with a far field is summed in Ewald's " *
-                                                 "multiplier (Stokeslet3D) only"))
+        R.far === nothing || K isa BiharmonicGradient2D ||
+            throw(ArgumentError("Evaluator: a LaplaceKernel3D remainder with a far field: use the SymbolKernel " *
+                                "itself as the kernel (Ewald of the whole kernel)"))
         sc = K isa LaplaceKernel3D
         dmax = maximum(_max_pair_distance(c, X, src; interleaved=!sc) for (c, X) in zip(C, trg))
         dmax < table_range(R) ||
@@ -348,7 +365,7 @@ _split(m::AbstractMatrix, trg) = (o = cumsum([0; length.(trg)]); [m[:, o[s]+1:o[
 _far_apply(F::_EwaldFar, E, q, eps) = [ewald_apply(F.plan, q)]
 _far_apply(F::_EwaldLaplaceFar, E, q, eps) = _split(ewald_apply(F.plan, q), E.trg)
 function _far_apply(F::_RadialEwaldFar, E, q, eps)
-    F.kind in (:value, :gradient) && return _split(ewald_apply(F.plan, q), E.trg)
+    F.kind in (:value, :gradient, :bgrad_whole) && return _split(ewald_apply(F.plan, q), E.trg)
     X = reduce(vcat, E.trg)
     if F.kind === :normal
         g = ewald_apply(F.plan, q); n = E.kernel.n
@@ -500,6 +517,7 @@ function _pair_kernel(E::Evaluator)
         return cut, self
     end
     R === nothing && return K, nothing
+    K isa BiharmonicGradient2D && return _WholeKernel(K, R), nothing     # Ewald of the whole kernel: all pairs
     α0 = R.table(0.0)[1] / K.μ
     _PlusRemainder(K.μ, R), Mat2(α0, 0, 0, α0)
 end

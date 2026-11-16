@@ -28,9 +28,12 @@ The ``k`` integrals are Gauss–Legendre on panels (uniform on ``[0, k_{\max}]``
 ``\rho_c`` (`RadialTable`), with a closed-form far field beyond it if one is given.
 
 The numerics keep the standard kernel for everything singular (the local corrections, Ewald's short range, the
-self terms, preconditioners) and add only the smooth remainder: to Ewald's long-range multiplier (`Stokeslet3D`), or
-as a local sum over the pairs closer than ``\rho_c`` where the whole kernel decays (`LaplaceKernel3D`,
-`BiharmonicGradient2D`), or through `SmoothConvolution`.
+self terms, preconditioners) and add only the smooth remainder: to Ewald's long-range multiplier (`Stokeslet3D`;
+`BiharmonicGradient2D` with a far field, whose whole kernel is sampled there), or as a local sum over the pairs
+closer than ``\rho_c`` where the whole kernel decays (`LaplaceKernel3D`, `BiharmonicGradient2D` without a far
+field), or through `SmoothConvolution`. The local sum is all-pairs when ``\rho_c`` exceeds the film (a depth
+comparable to its size): give the remainder a far field, and use the `SymbolKernel` itself as the kernel for
+`LaplaceKernel3D`, to sum it by Ewald instead.
 
 ```julia
 H = 0.3     # the 3D Laplace kernel over a layer of depth H, the value fixed on its floor: tanh(kH)/(2k)

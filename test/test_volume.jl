@@ -32,3 +32,33 @@ end
     @printf("volume potentials on the disc, m = 0–3: ∇V %.1e, ∇B %.1e (relative to the maximum on Γ)\n", ev, eb)
     @test ev < 10tol && eb < 10tol
 end
+
+@testset "∇B at finite depth: Ewald of the whole kernel against the local sum" begin
+    # the bilaplacian over a layer of depth H, symbol Φ(kH)/k⁴ (studies/bgrad_ewald/TODO.md): the deep kernel at
+    # c0 = −1 + 2K0 − 2 log 2H plus the regularized remainder (Φ − 1)/k⁴, its far field −(2 log ρ + c0)/8π
+    function Φ(x)
+        x < 0.1 && return x^4 * evalpoly(x^2, (1 / 10, -163 / 3150, 49 / 2250, -80614 / 9095625, 19115233 / 5320940625))
+        x > 30 && return 1.0
+        t = tanh(x); ic2 = 1 / cosh(x)^2
+        (t^3 - x^3 * ic2) / (t - x * ic2)
+    end
+    K0 = 1.3476268494                     # γ_E − ∫₀^∞ (Φ(s) − 1_{s>1}) ds/s
+    H, tol = 0.5, 1e-7; c0 = -1 + 2K0 - 2log(2H)
+    rem(far) = SymbolKernel(k -> Φ(k * H) / k^4; base=LaplaceKernel3D(), scale=H, outputs=(:gradient,), regularize=true,
+                            remainder=k -> (Φ(k * H) - 1) / k^4, q=24, nq=20,
+                            far=far ? (ρ -> (-(2log(ρ) + c0) / 8π,)) : nothing)
+    p = 10
+    bd, ad, _ = build_mesh(discretize_curve(θ -> Vec2(1.5cos(θ), 0.8sin(θ)), p; tol), p; edge_layers=2)
+    ev(R; kw...) = Evaluator(BiharmonicGradient2D(c0), ad; bd, density=:smooth, targets=(:area, :boundary), remainder=R,
+                             tol, eps=tol, kw...)
+    EE = ev(rem(true)); EL = ev(rem(false))
+    @test EE.far isa OpenSurfaces._RadialEwaldFar && EL.far isa OpenSurfaces._LocalFar
+    σ = [1 + 0.3sin(2x[1]) * cos(x[2]) for x in ad.x]
+    ue = EE(σ); ul = EL(σ)
+    e = max(maximum(norm.(ue[1] .- ul[1])) / maximum(norm.(ul[1])), maximum(norm.(ue[2] .- ul[2])) / maximum(norm.(ul[2])))
+    @printf("∇B at depth H = %g: Ewald of the whole kernel against the local sum %.1e\n", H, e)
+    @test e < tol
+    # a deep kernel whose c0 is not the remainder's leaves f ~ log ρ: refused
+    @test_throws ArgumentError Evaluator(BiharmonicGradient2D(; κ=0.3), ad; bd, density=:smooth, remainder=rem(true),
+                                         targets=(:area, :boundary), fast=:ewald)
+end
