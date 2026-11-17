@@ -336,11 +336,12 @@ function FilmEwald(xa::AbstractVector{Vec2}, xb::AbstractVector{Vec2}, nb::Abstr
         bx = [sc(p, 1) for p in xb]; by = [sc(p, 2) for p in xb]
         ntol = max(tol / 10, 100eps())     # FINUFFT's double-precision floor
         mk(t, nt, iflag) = FINUFFT.finufft_makeplan(t, [M[1], M[2]], iflag, nt, ntol; modeord=1, nthreads=nthreads)
-        p1a = mk(1, 2, -1); FINUFFT.finufft_setpts!(p1a, ax, ay)
-        p1b = mk(1, 2, -1); FINUFFT.finufft_setpts!(p1b, bx, by)
-        p2a = mk(2, 2, +1); FINUFFT.finufft_setpts!(p2a, ax, ay)
-        p2b = mk(2, 2, +1); FINUFFT.finufft_setpts!(p2b, bx, by)     # σ₁₁ + i σ₁₂ and σ₂₂ (`ewald_traction`)
-        p2b3 = boundary3d ? (q = mk(2, 2, +1); FINUFFT.finufft_setpts!(q, bx, by); q) : nothing
+        # the densities and the fields are real: two components go in one complex transform (`_spread`, `_packed`)
+        p1a = mk(1, 1, -1); FINUFFT.finufft_setpts!(p1a, ax, ay)
+        p1b = mk(1, 1, -1); FINUFFT.finufft_setpts!(p1b, bx, by)
+        p2a = mk(2, 1, +1); FINUFFT.finufft_setpts!(p2a, ax, ay)
+        p2b = mk(2, 1, +1); FINUFFT.finufft_setpts!(p2b, bx, by)     # σ₁₁ + i σ₁₂, then σ₂₂ (`ewald_traction`)
+        p2b3 = boundary3d ? (q = mk(2, 1, +1); FINUFFT.finufft_setpts!(q, bx, by); q) : nothing
     end
     tm[:shortrange] = @elapsed begin
         SRaa = _sr_matrix(xa, xa, true, rc, (i, r) -> c2 .* _S2S(r, σs) .+ c3 .* (ρ = norm(r); (φ, dφ) = _phiS(ρ, σs); _Kphi(r, φ, dφ, ρ)))
@@ -359,13 +360,39 @@ function FilmEwald(xa::AbstractVector{Vec2}, xb::AbstractVector{Vec2}, nb::Abstr
               K3, p2b3, SR3ba)
 end
 
-_tocols(f::AbstractVector{Vec2}) = (c = Matrix{ComplexF64}(undef, length(f), 2);
-                                    @inbounds for j in eachindex(f); c[j, 1] = f[j][1]; c[j, 2] = f[j][2]; end; c)
-
+"""
+Spectra (M₁ × M₂ × 2) of the two components of the real densities f: one type-1 transform of f₁ + i f₂ (plan p,
+one density), G = F₁ + i F₂ with F₁, F₂ Hermitian, split as F₁(k) = (G(k) + conj G(−k))/2, F₂(k) = (G(k) − conj G(−k))/2i.
+M is even, so the Nyquist mode −M/2 has no partner and is split as if it were its own (an error of the size of the
+multipliers there, ~e^{−(c+1)²}).
+"""
 function _spread(p, M, f::AbstractVector{Vec2})
-    F = Array{ComplexF64}(undef, M[1], M[2], 2)
-    FINUFFT.finufft_exec!(p, _tocols(f), F)
+    M1, M2 = M
+    c = Vector{ComplexF64}(undef, length(f))
+    @inbounds for j in eachindex(f)
+        c[j] = complex(f[j][1], f[j][2])
+    end
+    G = Matrix{ComplexF64}(undef, M1, M2)
+    FINUFFT.finufft_exec!(p, c, G)
+    F = Array{ComplexF64}(undef, M1, M2, 2)
+    Threads.@threads for b in 1:M2
+        bp = b == 1 ? 1 : M2 + 2 - b                 # the mode −k (modeord = 1)
+        @inbounds for a in 1:M1
+            ap = a == 1 ? 1 : M1 + 2 - a
+            g = G[a, b]; h = conj(G[ap, bp])
+            F[a, b, 1] = 0.5 * (g + h)
+            F[a, b, 2] = -0.5im * (g - h)
+        end
+    end
     F
+end
+
+"""Type-2 transform (plan p, one density) of V₁ + i V₂, the spectra of two real fields: their values at the plan's
+points, as (V₁ field) + i (V₂ field)."""
+function _packed(p, W::Matrix{ComplexF64}, n::Int)
+    U = Vector{ComplexF64}(undef, n)
+    FINUFFT.finufft_exec!(p, W, U)
+    U
 end
 
 """Type-1 NUFFT of the area sources (shared by `ewald_velocity` and `ewald_traction`)."""
@@ -375,21 +402,21 @@ ewald_spread(E::FilmEwald, fa::AbstractVector{Vec2}) = _spread(E.p1a, E.M, fa)
 function ewald_velocity(E::FilmEwald, Fa::Array{ComplexF64,3}, fa::AbstractVector{Vec2}, fb::AbstractVector{Vec2})
     M1, M2 = E.M
     Fb = _spread(E.p1b, E.M, fb)
-    V = similar(Fb)
+    W = Matrix{ComplexF64}(undef, M1, M2)
     Ka, Kb = E.Kaa, E.Kba
     Threads.@threads for b in 1:M2
         @inbounds for a in 1:M1
             a1 = Fa[a, b, 1]; a2 = Fa[a, b, 2]; b1 = Fb[a, b, 1]; b2 = Fb[a, b, 2]
-            V[a, b, 1] = Ka[a, b, 1] * a1 + Ka[a, b, 2] * a2 + Kb[a, b, 1] * b1 + Kb[a, b, 2] * b2
-            V[a, b, 2] = Ka[a, b, 2] * a1 + Ka[a, b, 3] * a2 + Kb[a, b, 2] * b1 + Kb[a, b, 3] * b2
+            v1 = Ka[a, b, 1] * a1 + Ka[a, b, 2] * a2 + Kb[a, b, 1] * b1 + Kb[a, b, 2] * b2
+            v2 = Ka[a, b, 2] * a1 + Ka[a, b, 3] * a2 + Kb[a, b, 2] * b1 + Kb[a, b, 3] * b2
+            W[a, b] = v1 + im * v2
         end
     end
-    Ua = Matrix{ComplexF64}(undef, length(fa), 2)
-    FINUFFT.finufft_exec!(E.p2a, V, Ua)
+    Ua = _packed(E.p2a, W, length(fa))
     usr = E.SRaa * interleave(fa) .+ E.SRab * interleave(fb)
     u = Vector{Vec2}(undef, length(fa))
     @inbounds for i in eachindex(u)
-        u[i] = Vec2(real(Ua[i, 1]) + usr[2i-1], real(Ua[i, 2]) + usr[2i]) - E.selfcoef * fa[i]
+        u[i] = Vec2(real(Ua[i]) + usr[2i-1], imag(Ua[i]) + usr[2i]) - E.selfcoef * fa[i]
     end
     u
 end
@@ -398,19 +425,18 @@ end
 function ewald_velocity_boundary(E::FilmEwald, fb::AbstractVector{Vec2})
     M1, M2 = E.M
     Fb = _spread(E.p1b, E.M, fb)
+    W = Matrix{ComplexF64}(undef, M1, M2)
     Kb = E.Kba
     Threads.@threads for b in 1:M2
         @inbounds for a in 1:M1
             b1 = Fb[a, b, 1]; b2 = Fb[a, b, 2]
-            Fb[a, b, 1] = Kb[a, b, 1] * b1 + Kb[a, b, 2] * b2
-            Fb[a, b, 2] = Kb[a, b, 2] * b1 + Kb[a, b, 3] * b2
+            W[a, b] = (Kb[a, b, 1] * b1 + Kb[a, b, 2] * b2) + im * (Kb[a, b, 2] * b1 + Kb[a, b, 3] * b2)
         end
     end
     na = E.SRab.nt
-    Ua = Matrix{ComplexF64}(undef, na, 2)
-    FINUFFT.finufft_exec!(E.p2a, Fb, Ua)
+    Ua = _packed(E.p2a, W, na)
     usr = E.SRab * interleave(fb)
-    [Vec2(real(Ua[i, 1]) + usr[2i-1], real(Ua[i, 2]) + usr[2i]) for i in 1:na]
+    [Vec2(real(Ua[i]) + usr[2i-1], imag(Ua[i]) + usr[2i]) for i in 1:na]
 end
 
 """Interior traction at Γ of Σ_area G2 fa (normals of the plan); `Fa = ewald_spread(E, fa)`. The stress
@@ -418,23 +444,23 @@ fields are real (odd imaginary multipliers of Hermitian spectra), so σ₁₁ + 
 transforms instead of three."""
 function ewald_traction(E::FilmEwald, Fa::Array{ComplexF64,3}, fa::AbstractVector{Vec2})
     M1, M2 = E.M
-    Sg = Array{ComplexF64}(undef, M1, M2, 2)
+    S1 = Matrix{ComplexF64}(undef, M1, M2); S2 = Matrix{ComplexF64}(undef, M1, M2)
     T = E.Tab
     Threads.@threads for b in 1:M2
         @inbounds for a in 1:M1
             a1 = Fa[a, b, 1]; a2 = Fa[a, b, 2]
-            Sg[a, b, 1] = (T[a, b, 1] * a1 + T[a, b, 4] * a2) + im * (T[a, b, 2] * a1 + T[a, b, 5] * a2)
-            Sg[a, b, 2] = T[a, b, 3] * a1 + T[a, b, 6] * a2
+            S1[a, b] = (T[a, b, 1] * a1 + T[a, b, 4] * a2) + im * (T[a, b, 2] * a1 + T[a, b, 5] * a2)
+            S2[a, b] = T[a, b, 3] * a1 + T[a, b, 6] * a2
         end
     end
     nbn = length(E.nb)
-    Sb = Matrix{ComplexF64}(undef, nbn, 2)
-    FINUFFT.finufft_exec!(E.p2b, Sg, Sb)
+    # two single transforms: on the dumbbell (2040 × 776 grid) faster than one batched call of two
+    Sb1 = _packed(E.p2b, S1, nbn); Sb2 = _packed(E.p2b, S2, nbn)
     tsr = E.SRba * interleave(fa)
     t = Vector{Vec2}(undef, nbn)
     @inbounds for i in 1:nbn
         n = E.nb[i]
-        s11 = real(Sb[i, 1]); s12 = imag(Sb[i, 1]); s22 = real(Sb[i, 2])
+        s11 = real(Sb1[i]); s12 = imag(Sb1[i]); s22 = real(Sb2[i])
         t[i] = Vec2(s11 * n[1] + s12 * n[2] + tsr[2i-1], s12 * n[1] + s22 * n[2] + tsr[2i])
     end
     t
@@ -444,20 +470,18 @@ end
 function ewald_velocity3d_boundary(E::FilmEwald, Fa::Array{ComplexF64,3}, fa::AbstractVector{Vec2})
     E.K3 === nothing && error("FilmEwald was built without boundary3d")
     M1, M2 = E.M
-    V = Array{ComplexF64}(undef, M1, M2, 2)
+    W = Matrix{ComplexF64}(undef, M1, M2)
     K = E.K3
     Threads.@threads for b in 1:M2
         @inbounds for a in 1:M1
             a1 = Fa[a, b, 1]; a2 = Fa[a, b, 2]
-            V[a, b, 1] = K[a, b, 1] * a1 + K[a, b, 2] * a2
-            V[a, b, 2] = K[a, b, 2] * a1 + K[a, b, 3] * a2
+            W[a, b] = (K[a, b, 1] * a1 + K[a, b, 2] * a2) + im * (K[a, b, 2] * a1 + K[a, b, 3] * a2)
         end
     end
     nbn = length(E.nb)
-    Ub = Matrix{ComplexF64}(undef, nbn, 2)
-    FINUFFT.finufft_exec!(E.p2b3, V, Ub)
+    Ub = _packed(E.p2b3, W, nbn)
     usr = E.SR3ba * interleave(fa)
-    [Vec2(real(Ub[i, 1]) + usr[2i-1], real(Ub[i, 2]) + usr[2i]) for i in 1:nbn]
+    [Vec2(real(Ub[i]) + usr[2i-1], imag(Ub[i]) + usr[2i]) for i in 1:nbn]
 end
 
 """

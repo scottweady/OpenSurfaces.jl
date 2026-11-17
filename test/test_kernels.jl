@@ -254,6 +254,14 @@ end
             eu, ef = relmax(u, ufe), relmax(t, tfe)
             @printf("film Ewald, %-12s: velocity %.1e, traction %.1e\n", rname, eu, ef)
             @test eu < 20tol && ef < 20tol
+            # with boundary3d: the 3D velocity on Γ from the area sources; the Γ sources alone at the area points
+            E = FilmEwald(src, xb, nb; μ_2D, μ_3D, remainder=R, tol, boundary3d=true)
+            v3ref = stokes3d_plane_direct(src, f, xb; μ_3D, eps=1e-12).u
+            R === nothing || (v3ref = v3ref .+ rem_sum(src, f, xb) ./ μ_3D)
+            e3 = relmax(ewald_velocity3d_boundary(E, ewald_spread(E, f), f), v3ref)
+            eb = relmax(OpenSurfaces.ewald_velocity_boundary(E, fb), stokes2d_direct(xb, fb, src; μ_2D, eps=1e-12).u)
+            @printf("film Ewald, %-12s: 3D velocity on Γ %.1e, Γ sources alone %.1e\n", rname, e3, eb)
+            @test e3 < 20tol && eb < 20tol
         end
     end
 end
