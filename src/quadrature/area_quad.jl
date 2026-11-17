@@ -173,6 +173,16 @@ mutable struct _AQWork{V}
     bB::Vector{NTuple{4,Vec2}}   # box s-node geometry (B, B', T, T')
     bsw::Vector{Float64}
     npts::Int                    # statistics: number of kernel evaluations
+    # polar rule: B and T of the panel expanded in powers of Δ = s − s0 at the apex (`_taylor_apex!`), and the
+    # coefficients of one t-line (`_tline!`); tn: the number of coefficients
+    tB::Vector{Vec2}
+    tT::Vector{Vec2}
+    tC::Vector{Vec2}
+    tdC::Vector{Vec2}
+    tE::Vector{Vec2}
+    tq::Vector{Float64}          # 3 × n: Legendre polynomials in Δ (recurrence buffers)
+    tn::Int
+    lpre::Vector{Float64}        # polar lines: prefix/suffix products of `_lag_cols!` (grown as needed)
 end
 
 _AQWork(p::Int, qmax::Int) = _AQWork{SVector{4,Float64}}(p, qmax)
@@ -180,7 +190,8 @@ function _AQWork{V}(p::Int, qmax::Int) where {V}
     _AQWork{V}(p, zeros(V, p, p), zeros(V, p), zeros(p), zeros(p), Float64[], Float64[],
                Float64[], Float64[], Float64[], NTuple{2,Float64}[], ComplexF64[], NTuple{5,Float64}[],
                zeros(p, qmax), zeros(V, qmax), zeros(V, p * qmax), zeros(qmax * p),
-               V[], Float64[], Vector{NTuple{4,Vec2}}(undef, qmax), zeros(qmax), 0)
+               V[], Float64[], Vector{NTuple{4,Vec2}}(undef, qmax), zeros(qmax), 0,
+               Vec2[], Vec2[], Vec2[], Vec2[], Vec2[], Float64[], 0, Float64[])
 end
 
 # A kernel value times the weight c, as the accumulated type V: the 2×2 form's column-major entries (the kernel
@@ -239,7 +250,39 @@ end
 @inline function _line_bufs!(wk, n::Int)
     length(wk.lk) < n && resize!(wk.lk, n)
     length(wk.lL) < n * wk.p && resize!(wk.lL, n * wk.p)
+    length(wk.lpre) < n && resize!(wk.lpre, n)
     wk.lk, wk.lL
+end
+
+"""
+L[(k − 1) n + m] = ℓ_k(x[m]) for m ≤ n: `_lag!` at n points at once, the same operations per point (bitwise the
+same values), with the points in the inner loop (SIMD; one point at a time waits on the products' latency).
+"""
+@inline function _lag_cols!(L::Vector{Float64}, r::Rule1D, x::Vector{Float64}, n::Int, pre::Vector{Float64})
+    xs = r.x; bw = r.bw; p = length(xs)
+    @inbounds begin
+        for m in 1:n
+            pre[m] = 1.0
+        end
+        for k in 1:p
+            o = (k - 1) * n; xk = xs[k]
+            @simd for m in 1:n
+                L[o+m] = pre[m]
+                pre[m] *= x[m] - xk
+            end
+        end
+        for m in 1:n
+            pre[m] = 1.0
+        end
+        for k in p:-1:1
+            o = (k - 1) * n; xk = xs[k]; b = bw[k]
+            @simd for m in 1:n
+                L[o+m] *= pre[m] * b
+                pre[m] *= x[m] - xk
+            end
+        end
+    end
+    L
 end
 
 """
@@ -378,11 +421,8 @@ function _sline!(wk::_AQWork{V}, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::
         xs = 0.5 * (1 - t) * db + 0.5 * (1 + t) * du
         J = xs[1] * xt[2] - xs[2] * xt[1]
         lk[m] = _kv(V, kern(it, r), wk.lw[m] * J)
-        _lag!(wk.lt, rt, t)
-        for i in 1:p
-            lL[(i-1)*n+m] = wk.lt[i]
-        end
     end
+    _lag_cols!(lL, rt, wk.lx, n, wk.lpre)
     _contract!(acc, lk, lL, n, p)
     wk.npts += n
     _lag!(wk.ls, rs, sfix)
@@ -397,27 +437,94 @@ function _sline!(wk::_AQWork{V}, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::
 end
 
 """
-Line with t = tfix (Δt = tfix − t0), points s = wk.lx[1:n] with Δs = wk.ld, weights wk.lw.
+B and T of panel P as polynomials in Δ = s − s0: wk.tB[j], wk.tT[j] the coefficients of Δ^(j−1), j ≤ wk.tn (the
+Legendre series' length). The Legendre polynomials are expanded in Δ by their recurrence (O(n²), once per apex), so
+a t-line of the polar rule evaluates B, B′ and (B(s) − B(s0))/Δ by Horner in Δ instead of the Legendre recurrence at
+every point (`_tline!`). The divided difference stays free of cancellation for small Δ, as in `_geom_dd`.
+"""
+function _taylor_apex!(wk::_AQWork, P::Panel, s0::Float64)
+    cB = P.B; cT = P.T; nB = length(cB); nT = length(cT); n = max(nB, nT)
+    n - 2 > _NLEG && error("_taylor_apex!: more than $(_NLEG + 2) Legendre coefficients")
+    for v in (wk.tB, wk.tT, wk.tC, wk.tdC, wk.tE)
+        length(v) < n && resize!(v, n)
+    end
+    length(wk.tq) < 3n && resize!(wk.tq, 3n)
+    tB = wk.tB; tT = wk.tT; q = wk.tq
+    @inbounds begin
+        for j in 1:n
+            tB[j] = zero(Vec2); tT[j] = zero(Vec2)
+        end
+        # q[(slot − 1) n + j]: coefficient of Δ^(j−1); P_k occupies j ≤ k + 1
+        i0 = 0; i1 = n; i2 = 2n
+        q[i0+1] = 1.0
+        tB[1] = cB[1]; tT[1] = cT[1]
+        if n >= 2
+            q[i1+1] = s0; q[i1+2] = 1.0
+            if nB >= 2
+                tB[1] += cB[2] * s0; tB[2] += cB[2]
+            end
+            if nT >= 2
+                tT[1] += cT[2] * s0; tT[2] += cT[2]
+            end
+        end
+        for k in 1:n-2
+            # P_{k+1} = a (s0 + Δ) P_k − c P_{k−1}
+            a = _LEG_A[k]; c = _LEG_C[k]
+            q[i2+k+2] = a * q[i1+k+1]
+            q[i2+k+1] = a * (s0 * q[i1+k+1] + q[i1+k])
+            for j in k:-1:2
+                q[i2+j] = a * (s0 * q[i1+j] + q[i1+j-1]) - c * q[i0+j]
+            end
+            q[i2+1] = a * s0 * q[i1+1] - c * q[i0+1]
+            if k + 2 <= nB
+                cc = cB[k+2]
+                for j in 1:k+2
+                    tB[j] += cc * q[i2+j]
+                end
+            end
+            if k + 2 <= nT
+                cc = cT[k+2]
+                for j in 1:k+2
+                    tT[j] += cc * q[i2+j]
+                end
+            end
+            i0, i1, i2 = i1, i2, i0
+        end
+    end
+    wk.tn = n
+    nothing
+end
+
+"""
+Line with t = tfix (Δt = tfix − t0), points s = wk.lx[1:n] with Δs = wk.ld, weights wk.lw. Needs the apex's
+expansion (`_taylor_apex!`).
 """
 function _tline!(wk::_AQWork{V}, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int, ap::_Apex,
                  tfix::Float64, Δt::Float64, n::Int) where {F,V}
     p = wk.p; acc = wk.acc
     a1 = 0.5 * (1 - tfix); a2 = 0.5 * (1 + tfix)
     rt0 = Δt * 0.5 * (ap.T0 - ap.B0)
+    # along the line: x(s) − x0 = −r, with C = a1 B + a2 T (C(s) − C(s0) = Δs Σ_{j≥2} C_j Δs^(j−2)),
+    # x_s = C′(s) and x_t = E(s), E = (T − B)/2
+    nc = wk.tn; C = wk.tC; dC = wk.tdC; E = wk.tE
+    @inbounds for j in 1:nc
+        C[j] = a1 * wk.tB[j] + a2 * wk.tT[j]
+        dC[j] = (j - 1) * C[j]
+        E[j] = 0.5 * (wk.tT[j] - wk.tB[j])
+    end
     lk, lL = _line_bufs!(wk, n)
     @inbounds for m in 1:n
         s = wk.lx[m]; Δs = wk.ld[m]
-        b, db, DB, u, du, DT = _geom_dd(P, ap.s0, Δs)
-        r = -(a1 * Δs * DB + a2 * Δs * DT + rt0)
-        xs = a1 * db + a2 * du
-        xt = 0.5 * (u - b)
+        DC = C[nc]; xs = dC[nc]; xt = E[nc]
+        for j in nc-1:-1:2
+            DC = muladd(Δs, DC, C[j]); xs = muladd(Δs, xs, dC[j]); xt = muladd(Δs, xt, E[j])
+        end
+        xt = muladd(Δs, xt, E[1])
+        r = -(Δs * DC + rt0)
         J = xs[1] * xt[2] - xs[2] * xt[1]
         lk[m] = _kv(V, kern(it, r), wk.lw[m] * J)
-        _lag!(wk.ls, rs, s)
-        for i in 1:p
-            lL[(i-1)*n+m] = wk.ls[i]
-        end
     end
+    _lag_cols!(lL, rs, wk.lx, n, wk.lpre)
     _contract!(acc, lk, lL, n, p)
     wk.npts += n
     _lag!(wk.lt, rt, tfix)
@@ -568,6 +675,7 @@ function _polar!(wk::_AQWork, P::Panel, rs::Rule1D, rt::Rule1D, kern::F, it::Int
     σhi = 1.0
     _, xs0, xt0, _ = panel_map(P, s0, max(t0, -1.0))
     ap = _Apex(s0, mode == _BOTTOM ? -1.0 : t0, legendre_eval(P.B, s0)[1], legendre_eval(P.T, s0)[1])
+    _taylor_apex!(wk, P, s0)
     X = mode == _TAU ? hcat(xs0, 4 * A[2] * xt0) : hcat(xs0, xt0)
     X = SMatrix{2,2,Float64,4}(X)
     # sides: (P1, P2, vertical?)

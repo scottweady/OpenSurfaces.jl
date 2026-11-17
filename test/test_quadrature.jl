@@ -181,6 +181,32 @@ const VERBOSE = false
     @printf("single panels (straight, curved, graded layer, interior), all targets: max rel. error %.1e\n", worst)
 end
 
+# the polar rule's t-lines evaluate B, B′ and (B(s) − B(s0))/Δ from B and T expanded in Δ = s − s0 at the apex
+# (`_taylor_apex!`): the same values as the Legendre recurrence (`_geom_dd`), the divided difference down to Δ = 1e-12
+@testset "polar rule: panel geometry expanded at the apex" begin
+    wk = OpenSurfaces._AQWork(10, 18)
+    worst = 0.0
+    for (name, P) in test_panels
+        Pt = OpenSurfaces._trim_panel(P)
+        for s0 in (-1.0, -0.97, -0.3, 0.0, 0.62, 1.0)
+            OpenSurfaces._taylor_apex!(wk, Pt, s0)
+            n = wk.tn
+            for Δ in (-1.7, -0.4, -1e-3, -1e-12, 1e-12, 1e-6, 0.05, 0.9, 1.9)
+                abs(s0 + Δ) <= 1 || continue
+                b, db, DB, u, du, DT = OpenSurfaces._geom_dd(Pt, s0, Δ)
+                h(c, k0) = (v = c[n]; for j in n-1:-1:k0; v = muladd(Δ, v, c[j]); end; v)
+                dh(c) = (v = (n - 1) * c[n]; for j in n-1:-1:2; v = muladd(Δ, v, (j - 1) * c[j]); end; v)
+                scale = maximum(norm, Pt.B) + maximum(norm, Pt.T)
+                e = max(norm(h(wk.tB, 1) - b), norm(h(wk.tT, 1) - u), norm(dh(wk.tB) - db), norm(dh(wk.tT) - du),
+                        norm(h(wk.tB, 2) - DB), norm(h(wk.tT, 2) - DT)) / scale
+                worst = max(worst, e)
+                @test e < 1e-13
+            end
+        end
+    end
+    @printf("polar rule geometry expanded at the apex against the Legendre recurrence: max %.1e\n", worst)
+end
+
 @testset "disk, p = 10" begin
     for (K, rin, p) in ((8, 0.78, 10),)
         bp, ap = disk_mesh(K, rin)
